@@ -64,8 +64,22 @@ Claude Code を活用したマルチエージェントシステム。Orchestrato
 
 ### ワンライナーでインストール（推奨）
 
+**パブリックリポジトリの場合:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash
+```
+
+**プライベートリポジトリの場合:**
+
+`gh` CLIを使用する場合 (推奨):
+```bash
+gh api repos/Shineos/claude-orchestra/contents/install-remote.sh -q .content | base64 -d | bash
+```
+
+または `GITHUB_TOKEN` を使用する場合:
+```bash
+export GITHUB_TOKEN=your_token_here
+curl -fsSL -H "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash
 ```
 
 インストール先を指定する場合:
