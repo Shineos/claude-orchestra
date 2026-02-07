@@ -128,7 +128,8 @@ if [[ -z "$INSTALL_SCRIPT" || ! -f "$INSTALL_SCRIPT" ]]; then
 fi
 
 chmod +x "$INSTALL_SCRIPT"
-bash "$INSTALL_SCRIPT" "$TARGET_PROJECT"
+# リモートインストールでは --force をデフォルトで使用（非対話環境のため）
+bash "$INSTALL_SCRIPT" --force "$TARGET_PROJECT"
 
 echo ""
 printf "%b" "${GREEN}✓ リモートインストールが完了しました${NC}\n"

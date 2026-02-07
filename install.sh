@@ -18,12 +18,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # テンプレートディレクトリはカレントディレクトリ（リポジトリルート）
 TEMPLATE_DIR="$SCRIPT_DIR"
 
-# ターゲットプロジェクト
-TARGET_PROJECT="${1:-}"
+# 引数解析
+FORCE=false
+TARGET_PROJECT=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -f|--force)
+            FORCE=true
+            shift
+            ;;
+        *)
+            if [[ -z "$TARGET_PROJECT" ]]; then
+                TARGET_PROJECT="$1"
+            fi
+            shift
+            ;;
+    esac
+done
 
 if [[ -z "$TARGET_PROJECT" ]]; then
     printf "%b" "${RED}エラー: ターゲットプロジェクトのパスを指定してください${NC}\n"
-    echo "使用方法: $0 /path/to/target/project"
+    echo "使用方法: $0 [-f|--force] /path/to/target/project"
     exit 1
 fi
 
@@ -45,13 +61,18 @@ CLAUDE_DIR="$TARGET_PROJECT/.claude"
 # 既存チェック
 if [[ -d "$CLAUDE_DIR" ]]; then
     printf "%b" "${YELLOW}⚠ .claude ディレクトリは既に存在します${NC}\n"
-    read -p "上書きしますか？ (y/N): " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        printf "%b" "${YELLOW}キャンセルしました${NC}\n"
-        exit 0
+    if [[ "$FORCE" == true ]]; then
+        printf "%b" "${CYAN}--force オプションが指定されたため、上書きします${NC}\n"
+        rm -rf "$CLAUDE_DIR"
+    else
+        read -p "上書きしますか？ (y/N): " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            printf "%b" "${YELLOW}キャンセルしました${NC}\n"
+            exit 0
+        fi
+        rm -rf "$CLAUDE_DIR"
     fi
-    rm -rf "$CLAUDE_DIR"
 fi
 
 # ディレクトリ作成
