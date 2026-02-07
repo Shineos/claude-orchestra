@@ -7,7 +7,6 @@ Claude Code マルチエージェントシステムの詳細仕様について�
 本システムは、**Orchestrator（調整役）** と複数の **専門エージェント** から構成される自律型マルチエージェントシステムです。Claude Code CLI を活用し、自然言語による指示を具体的な技術タスクに分解・実行します。
 
 ![Architecture](images/architecture.png)
-*システム全体像*
 
 ### 構成要素
 
