@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create archive
+        run: |
+          mkdir -p dist
+          # .git, .github, .DS_Store などを除外してアーカイブを作成
+          tar --exclude='./.git' --exclude='./.github' --exclude='./.DS_Store' --exclude='./dist' -czvf dist/claude-orchestra.tar.gz .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/claude-orchestra.tar.gz
+          generate_release_notes: true

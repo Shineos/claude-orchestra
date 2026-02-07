@@ -1,0 +1,17 @@
+graph TD
+    User[User] -->|Input Task| Orch[Orchestrator Agent]
+
+    subgraph "Claude Orchestra System"
+        Orch -->|Analyze & Decompose| Plan[Task Plan]
+        Plan -->|Assign| FE[Frontend Agent]
+        Plan -->|Assign| BE[Backend Agent]
+        Plan -->|Assign| Test[Tests Agent]
+        Plan -->|Assign| Doc[Docs Agent]
+
+        FE -->|Implement UI| Code[Codebase]
+        BE -->|Implement Logic| Code
+        Test -->|Verify| Code
+        Doc -->|Document| Code
+
+        Code -->|Feedback| Orch
+    end
