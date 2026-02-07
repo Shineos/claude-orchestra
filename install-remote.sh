@@ -23,12 +23,6 @@ REPO_NAME="claude-orchestra"
 
 # 引数解析
 VERSION=""
-GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-
-# gh CLIからトークン取得を試みる
-if [[ -z "$GITHUB_TOKEN" ]] && command -v gh &> /dev/null; then
-    GITHUB_TOKEN=$(gh auth token 2>/dev/null)
-fi
 TARGET_PROJECT=""
 
 while [[ $# -gt 0 ]]; do
@@ -77,17 +71,12 @@ if [[ -z "$VERSION" ]]; then
     # GitHub API から最新リリースを取得
     LATEST_RELEASE_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
     
-    CURL_CMD="curl -fsSL"
-    if [[ -n "$GITHUB_TOKEN" ]]; then
-        CURL_CMD="curl -fsSL -H \"Authorization: token $GITHUB_TOKEN\""
-    fi
-    
     if command -v jq &> /dev/null; then
         # jq がある場合
-        VERSION=$(eval "$CURL_CMD" "$LATEST_RELEASE_URL" | jq -r '.tag_name')
+        VERSION=$(curl -fsSL "$LATEST_RELEASE_URL" | jq -r '.tag_name')
     else
         # jq がない場合は grep で抽出
-        VERSION=$(eval "$CURL_CMD" "$LATEST_RELEASE_URL" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*: *"\([^"]*\)"/\1/')
+        VERSION=$(curl -fsSL "$LATEST_RELEASE_URL" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*: *"\([^"]*\)"/\1/')
     fi
     
     if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
@@ -100,39 +89,18 @@ printf "%b" "${GREEN}✓ バージョン: ${VERSION}${NC}\n"
 echo ""
 
 # ダウンロードURL
+DOWNLOAD_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/claude-orchestra.tar.gz"
+
 # 一時ディレクトリを作成
 TMP_DIR=$(mktemp -d)
 trap "rm -rf $TMP_DIR" EXIT
 
-# リリースをダウンロード
+# アーカイブをダウンロード
 printf "%b" "${CYAN}ダウンロード中...${NC}\n"
-if [[ -n "$GITHUB_TOKEN" ]]; then
-    # Private Repo support
-    # GitHub APIからリリースアセットIDを取得し、それを使ってダウンロード
-    ASSET_ID=$(curl -fsSL -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/tags/$VERSION" | \
-               grep -o '"id": [0-9]*' | head -n 1 | awk '{print $2}')
-
-    if [[ -z "$ASSET_ID" ]]; then
-        printf "%b" "${RED}エラー: リリースアセットIDを取得できませんでした。GITHUB_TOKENが正しいか、または指定されたバージョンが存在するか確認してください。${NC}\n"
-        exit 1
-    fi
-
-    if ! curl -fsSL -H "Authorization: token $GITHUB_TOKEN" -H "Accept: application/octet-stream" \
-         "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/assets/$ASSET_ID" \
-         -o "$TMP_DIR/claude-orchestra.tar.gz"; then
-        printf "%b" "${RED}エラー: プライベートリポジトリからのダウンロードに失敗しました。${NC}\n"
-        printf "%b" "${YELLOW}ヒント: GITHUB_TOKENに適切な権限があるか確認してください。${NC}\n"
-        exit 1
-    fi
-else
-    # Public Repo support
-    DOWNLOAD_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${VERSION}/claude-orchestra.tar.gz"
-    if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/claude-orchestra.tar.gz"; then
-        printf "%b" "${RED}エラー: リリースのダウンロードに失敗しました。${NC}\n"
-        printf "%b" "${YELLOW}ヒント: プライベートリポジトリの場合は GITHUB_TOKEN を設定してください。${NC}\n"
-        printf "%b" "${YELLOW}URL: ${DOWNLOAD_URL}${NC}\n"
-        exit 1
-    fi
+if ! curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/claude-orchestra.tar.gz"; then
+    printf "%b" "${RED}エラー: ダウンロードに失敗しました${NC}\n"
+    printf "%b" "${YELLOW}URL: ${DOWNLOAD_URL}${NC}\n"
+    exit 1
 fi
 
 # 解凍
