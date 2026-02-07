@@ -1,5 +1,11 @@
 # Claude Code マルチエージェントシステム
 
+> [!CAUTION]
+> **動作環境について**
+> 本システムは **macOS** および **Linux** 環境専用です。
+> Windows 環境での動作は保証しておりません。
+
+
 Claude Code を活用したマルチエージェントシステム。Orchestrator（調整）と各専門エージェント（Frontend、Backend、Tests、Docs）が連携して効率的な開発を実現します。
 
 ![Architecture](docs/images/architecture.png)
@@ -150,7 +156,7 @@ alias agent="bash ./.claude/agent.sh"
 | `orch monitor` | リアルタイムモニタリング（5秒更新） |
 | `orch monitor-agents` | エージェント別リアルタイム監視 |
 | `orch list` / `orch ps` | 実行中のエージェント一覧 |
-| `orch stop <agent|all>` | エージェントを停止 |
+| `orch stop <agent\|all>` | エージェントを停止 |
 | `orch restart <agent>` | エージェントを再起動 |
 | `orch remove <agent>` | エージェントを停止してタスク削除 |
 
