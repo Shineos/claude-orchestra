@@ -3,7 +3,6 @@
 Claude Code を活用したマルチエージェントシステム。Orchestrator（調整）と各専門エージェント（Frontend、Backend、Tests、Docs）が連携して効率的な開発を実現します。
 
 ![Architecture](docs/images/architecture.png)
-*システム全体像*
 
 ## 前提条件
 
