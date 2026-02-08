@@ -40,7 +40,7 @@ WORKTREES_DIR="$PROJECT_ROOT/.claude/worktrees"
 AGENT_SCRIPT="$CLAUDE_DIR/agent.sh"
 
 # デフォルトタイムアウト設定（秒）
-CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
+CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-1200}"
 
 # Worktree モード設定
 USE_WORKTREE="${USE_WORKTREE:-false}"
@@ -1138,12 +1138,12 @@ stop_all_agents() {
             rm -f "$PID_DIR"/*.json 2>/dev/null
         fi
 
-        # すべてのin_progressタスクをpendingに戻す
+        # すべてのin_progressタスクをstoppedに変更
         local in_progress_count=$(jq '[.tasks[] | select(.status == "in_progress")] | length' "$TASKS_FILE" 2>/dev/null || echo "0")
         if [[ "$in_progress_count" -gt 0 ]]; then
-            jq '(.tasks[] | select(.status == "in_progress")) |= (.status = "pending" | .started_at = null)' "$TASKS_FILE" > "/tmp/tasks_reset_$$.tmp"
-            mv "/tmp/tasks_reset_$$.tmp" "$TASKS_FILE"
-            printf "%b" "${GREEN}✓ $in_progress_count 個のタスクをpendingに戻しました${NC}\n"
+            jq '(.tasks[] | select(.status == "in_progress")) |= (.status = "stopped")' "$TASKS_FILE" > "/tmp/tasks_stopped_$$.tmp"
+            mv "/tmp/tasks_stopped_$$.tmp" "$TASKS_FILE"
+            printf "%b" "${GREEN}✓ $in_progress_count 個のタスクを停止状態にしました${NC}\n"
         fi
 
         printf "%b" "${GREEN}すべてのエージェントを停止しました${NC}\n"
@@ -1170,12 +1170,20 @@ restart_agent() {
     # 再起動
     printf "%b" "${CYAN}再起動中...${NC}\n"
 
+    # stoppedタスクがある場合は、in_progressに戻す
+    local stopped_count=$(jq --arg agent "$agent" '[.tasks[] | select(.agent == $agent and .status == "stopped")] | length' "$TASKS_FILE" 2>/dev/null || echo "0")
+    if [[ "$stopped_count" -gt 0 ]]; then
+        jq --arg agent "$agent" '(.tasks[] | select(.agent == $agent and .status == "stopped")) |= (.status = "in_progress")' "$TASKS_FILE" > "/tmp/tasks_reset_stopped_$$.tmp"
+        mv "/tmp/tasks_reset_stopped_$$.tmp" "$TASKS_FILE"
+        printf "%b" "${GREEN}✓ $stopped_count 個のタスクを再開しました${NC}\n"
+    fi
+
     # pendingタスクのIDを取得
     local pending_tasks=$(jq -r --arg agent "$agent" '.tasks[] | select(.agent == $agent and .status == "pending") | .id' "$TASKS_FILE" 2>/dev/null || echo "")
 
     # failedタスクがある場合は、常にpendingに戻す
-    local failed_tasks=$(jq -r --arg agent "$agent" '[.tasks[] | select(.agent == $agent and .status == "failed")] | .id' "$TASKS_FILE" 2>/dev/null || echo "")
-    if [[ -n "$failed_tasks" ]]; then
+    local failed_count=$(jq --arg agent "$agent" '[.tasks[] | select(.agent == $agent and .status == "failed")] | length' "$TASKS_FILE" 2>/dev/null || echo "0")
+    if [[ "$failed_count" -gt 0 ]]; then
         jq --arg agent "$agent" '(.tasks[] | select(.agent == $agent and .status == "failed")) |= (.status = "pending" | .started_at = null)' "$TASKS_FILE" > "/tmp/tasks_reset_failed_$$.tmp"
         mv "/tmp/tasks_reset_failed_$$.tmp" "$TASKS_FILE"
 
@@ -1726,6 +1734,7 @@ show_status() {
     local in_progress=$(jq '[.tasks[] | select(.status == "in_progress")] | length' "$TASKS_FILE")
     local completed=$(jq '[.tasks[] | select(.status == "completed")] | length' "$TASKS_FILE")
     local failed=$(jq '[.tasks[] | select(.status == "failed")] | length' "$TASKS_FILE")
+    local stopped=$(jq '[.tasks[] | select(.status == "stopped")] | length' "$TASKS_FILE")
 
     # サマリー表示
     printf "%b" "${CYAN}サマリー:${NC}\n"
@@ -1734,6 +1743,7 @@ show_status() {
     printf "%b" "  実行中:   ${BLUE}$in_progress${NC}\n"
     printf "%b" "  完了:     ${GREEN}$completed${NC}\n"
     printf "%b" "  失敗:     ${RED}$failed${NC}\n"
+    printf "%b" "  停止中:   ${MAGENTA}$stopped${NC}\n"
     echo ""
 
     # 進捗バー
@@ -1776,6 +1786,10 @@ show_status() {
             "failed")
                 status_icon="✗"
                 status_color="$RED"
+                ;;
+            "stopped")
+                status_icon="■"
+                status_color="$MAGENTA"
                 ;;
         esac
 
@@ -3005,6 +3019,54 @@ case "${1:-}" in
         printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
         printf "%b" "${CYAN}  ログ表示: $(basename "$_log_file")${NC}\n"
         printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+        echo ""
+
+        # エージェント生存状態を表示
+        PID_DIR="$CLAUDE_DIR/pids"
+        agent_count=0
+        running_agents=()
+
+        if [[ -d "$PID_DIR" ]]; then
+            for pid_file in "$PID_DIR"/*.pid; do
+                if [[ -f "$pid_file" ]]; then
+                    pid=$(cat "$pid_file" 2>/dev/null)
+                    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                        agent=$(basename "$pid_file" .pid)
+                        running_agents+=("$agent")
+                        agent_count=$((agent_count + 1))
+                    fi
+                fi
+            done
+        fi
+
+        printf "%b" "${CYAN}実行中のエージェント:${NC} $agent_count 個\n"
+        if [[ $agent_count -gt 0 ]]; then
+            for agent in "${running_agents[@]}"; do
+                # エージェントの現在のタスクを取得
+                current_task=$(jq -r --arg agent "$agent" '.tasks[] | select(.agent == $agent and (.status == "in_progress" or .status == "stopped")) | "\(.id)\t\(.description)\t\(.status)"' "$TASKS_FILE" 2>/dev/null | head -1)
+                if [[ -n "$current_task" ]]; then
+                    task_id=$(echo "$current_task" | cut -f1)
+                    task_desc=$(echo "$current_task" | cut -f2)
+                    task_status=$(echo "$current_task" | cut -f3)
+                    status_icon=""
+                    if [[ "$task_status" == "in_progress" ]]; then
+                        status_icon="●"
+                    elif [[ "$task_status" == "stopped" ]]; then
+                        status_icon="■"
+                    fi
+                    printf "%b" "  ${MAGENTA}$agent${NC}: $status_icon [$task_id] $task_desc\n"
+                else
+                    printf "%b" "  ${MAGENTA}$agent${NC}: 待機中\n"
+                fi
+            done
+        fi
+        echo ""
+
+        # 最後のログ更新時刻を表示
+        last_modified=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$_log_file" 2>/dev/null)
+        if [[ -n "$last_modified" ]]; then
+            printf "%b" "${CYAN}最終更新:${NC} $last_modified\n"
+        fi
         echo ""
 
         # フィルタリング処理
