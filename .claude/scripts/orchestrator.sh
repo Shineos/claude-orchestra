@@ -2737,7 +2737,7 @@ case "${1:-}" in
             reset_task "$2"
         else
             # オプション: --keep-logs を指定するとログを保持
-            local keep_logs="false"
+            keep_logs="false"
             if [[ "$2" == "--keep-logs" ]]; then
                 keep_logs="true"
             fi
