@@ -39,6 +39,9 @@ WORKTREES_DIR="$PROJECT_ROOT/.claude/worktrees"
 # エージェント起動スクリプト
 AGENT_SCRIPT="$CLAUDE_DIR/agent.sh"
 
+# デフォルトタイムアウト設定（秒）
+CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
+
 # Worktree モード設定
 USE_WORKTREE="${USE_WORKTREE:-false}"
 
@@ -350,6 +353,7 @@ confirm_decomposition() {
         fi
         if [[ -n "$deps" ]]; then
             printf "%b" "    依存: [${deps}]\n"
+            printf "%b" "    ${YELLOW}※ [0,1]は「0番目と1番目のタスク（1番目と2番目）」を意味します${NC}\n"
         fi
         echo ""
         index=$((index + 1))
@@ -373,7 +377,10 @@ confirm_decomposition() {
         return 0
     fi
 
-    read -r -n 1 response
+    # read -n 1はターミナルバッファと干渉するため、通常のreadで1行読んで最初の文字を取得
+    read -r response < /dev/tty
+    response="${response:0:1}"  # 最初の1文字のみ取得
+
     echo ""
     echo ""
 
@@ -427,7 +434,7 @@ collect_feedback() {
         return 1  # フィードバックなしで再分解
     fi
 
-    read -r choice
+    read -r choice < /dev/tty
     echo ""
 
     local feedback=""
@@ -435,31 +442,31 @@ collect_feedback() {
     case "$choice" in
         1)
             echo "追加したいサブタスクの説明を入力してください:"
-            read -r feedback
+            read -r feedback < /dev/tty
             feedback="action: add_subtask, description: $feedback"
             ;;
         2)
             echo "削除したいサブタスク番号を入力してください:"
-            read -r idx
+            read -r idx < /dev/tty
             feedback="action: remove_subtask, index: $idx"
             ;;
         3)
             echo "変更したいサブタスク番号を入力してください:"
-            read -r idx
+            read -r idx < /dev/tty
             echo "新しいエージェントを入力してください (frontend/backend/tests/docs):"
-            read -r agent
+            read -r agent < /dev/tty
             feedback="action: change_agent, index: $idx, new_agent: $agent"
             ;;
         4)
             echo "変更したいサブタスク番号を入力してください:"
-            read -r idx
+            read -r idx < /dev/tty
             echo "新しい説明を入力してください:"
-            read -r desc
+            read -r desc < /dev/tty
             feedback="action: modify_description, index: $idx, new_description: $desc"
             ;;
         5)
             echo "自由形式のフィードバックを入力してください:"
-            read -r feedback
+            read -r feedback < /dev/tty
             feedback="action: freeform, feedback: $feedback"
             ;;
         *)
@@ -491,12 +498,23 @@ edit_decomposition() {
 
     local edited_json=""
     local line
-    while IFS= read -r line; do
-        if [[ -z "$line" ]]; then
-            break
-        fi
-        edited_json+="$line"$'\n'
-    done
+    # TTYが利用可能な場合はTTYから、それ以外の場合はstdinから読み取る
+    if [[ -t 0 ]]; then
+        while IFS= read -r line; do
+            if [[ -z "$line" ]]; then
+                break
+            fi
+            edited_json+="$line"$'\n'
+        done
+    else
+        # /dev/ttyから読み取る（コマンド置換内でも動作するように）
+        while IFS= read -r line < /dev/tty; do
+            if [[ -z "$line" ]]; then
+                break
+            fi
+            edited_json+="$line"$'\n'
+        done
+    fi
 
     # 検証
     local validation=$(validate_decomposition "$edited_json")
@@ -682,8 +700,12 @@ add_task_auto() {
         fi
 
         # 分解結果を確認
+        # set -eが有効なため、一時的に無効化して戻り値を取得
+        # サブシェルを使用しない方法に変更
+        set +e
         confirm_decomposition "$task_desc" "$decomposition_json" "$attempt"
         local confirm_result=$?
+        set -e
 
         case $confirm_result in
             0)  # 承認
@@ -711,16 +733,17 @@ add_task_auto() {
                 decomposition_json=$(subtasks_array_to_json "${subtasks[@]}")
                 confirmed=true
                 ;;
-            3)  # 編集
-                local edited_json
-                edited_json=$(edit_decomposition "$decomposition_json")
-                if [[ $? -eq 0 ]]; then
-                    decomposition_json="$edited_json"
-                    confirmed=true
-                else
-                    printf "%b" "${YELLOW}編集をキャンセルしました。元のプランを使用します。${NC}\n"
-                    confirmed=true
-                fi
+            3)  # 編集（JSON出力）
+                # JSONファイルを出力して終了
+                local json_file="$CLAUDE_DIR/decomposition.json"
+                echo "$decomposition_json" | jq '.' > "$json_file"
+
+                echo ""
+                printf "%b" "${CYAN}\"${json_file}\"ファイルを手動で編集してください。${NC}\n"
+                printf "%b" "${CYAN}編集後、\`${GREEN}orch load ${json_file}${CYAN}\`${NC} コマンド実行してください\n"
+                echo ""
+
+                return 0
                 ;;
             4)  # キャンセル
                 printf "%b" "${YELLOW}キャンセルしました${NC}\n"
@@ -883,6 +906,17 @@ EOF
 
 # エージェントをバックグラウンドで起動（自動実行用）
 launch_agents_background() {
+    # 最後の引数がタイムアウト（数値のみ）かどうかをチェック
+    local last_arg="${@: -1}"
+    local timeout=""
+
+    # タイムアウトが数値のみの場合は、タイムアウトとして扱う
+    if [[ "$last_arg" =~ ^[0-9]+$ ]]; then
+        timeout="$last_arg"
+        # タイムアウトを除いたタスクIDを取得
+        set -- "${@:1:$#-1}"
+    fi
+
     local task_ids=("$@")
     local unique_agents=()
 
@@ -892,6 +926,9 @@ launch_agents_background() {
 
     printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     printf "%b" "${CYAN}  エージェント自動起動（バックグラウンド）${NC}\n"
+    if [[ -n "$timeout" ]]; then
+        printf "%b" "${CYAN}  タイムアウト設定: ${timeout}秒${NC}\n"
+    fi
     printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     echo ""
 
@@ -941,7 +978,12 @@ launch_agents_background() {
         printf "%b" "${GREEN}起動中: $agent (watchモード)${NC} -> "
 
         # バックグラウンドでエージェントを起動（watchモード）
-        nohup bash "$AGENT_SCRIPT" "$agent" watch >> "$log_file" 2>&1 &
+        # タイムアウトが指定されている場合は環境変数を設定
+        if [[ -n "$timeout" ]]; then
+            CLAUDE_TIMEOUT="$timeout" nohup bash "$AGENT_SCRIPT" "$agent" watch >> "$log_file" 2>&1 &
+        else
+            nohup bash "$AGENT_SCRIPT" "$agent" watch >> "$log_file" 2>&1 &
+        fi
         local agent_pid=$!
 
         # PIDを記録
@@ -1041,44 +1083,176 @@ stop_agent() {
 # すべてのエージェントを停止
 stop_all_agents() {
     local PID_DIR="$CLAUDE_DIR/pids"
+    local found=false
 
-    if [[ ! -d "$PID_DIR" ]]; then
-        printf "%b" "${YELLOW}実行中のエージェントはありません${NC}\n"
-        return
+    # まずPIDファイルからエージェントを停止
+    if [[ -d "$PID_DIR" ]]; then
+        for pid_file in "$PID_DIR"/*.pid; do
+            if [[ -f "$pid_file" ]]; then
+                local agent=$(basename "$pid_file" .pid)
+                stop_agent "$agent"
+                found=true
+            fi
+        done
     fi
 
-    local found=false
-    for pid_file in "$PID_DIR"/*.pid; do
-        if [[ -f "$pid_file" ]]; then
-            local agent=$(basename "$pid_file" .pid)
-            stop_agent "$agent"
-            found=true
-        fi
-    done
+    # フォールバック: 実行中のClaudeプロセスを直接探して停止
+    # (PIDファイルがない場合や、外部から起動されたプロセス用)
+    local claude_pids=$(pgrep -f "claude -p" | tr '\n' ' ')
+    if [[ -n "$claude_pids" ]]; then
+        printf "%b" "${YELLOW}追加で実行中のClaudeプロセスを停止中...${NC}\n"
+        for pid in $claude_pids; do
+            if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                # プロセスのコマンドラインを取得して確認
+                local cmdline=$(ps -p "$pid" -o command= 2>/dev/null)
+                if [[ "$cmdline" == *"claude -p"* ]]; then
+                    printf "%b" "${CYAN}Claudeプロセス (PID: $pid) を停止中...${NC}\n"
+                    kill "$pid" 2>/dev/null
+
+                    # 最大5秒待機
+                    local count=0
+                    while kill -0 "$pid" 2>/dev/null && [[ $count -lt 5 ]]; do
+                        sleep 1
+                        count=$((count + 1))
+                    done
+
+                    # まだ生きている場合は強制終了
+                    if kill -0 "$pid" 2>/dev/null; then
+                        kill -9 "$pid" 2>/dev/null
+                        sleep 1
+                    fi
+
+                    printf "%b" "${GREEN}✓${NC} 停止完了\n"
+                    found=true
+                fi
+            fi
+        done
+    fi
 
     if [[ "$found" == "false" ]]; then
         printf "%b" "${YELLOW}実行中のエージェントはありません${NC}\n"
+    else
+        # 残ったPIDファイルをクリーンアップ
+        if [[ -d "$PID_DIR" ]]; then
+            rm -f "$PID_DIR"/*.pid 2>/dev/null
+            rm -f "$PID_DIR"/*.json 2>/dev/null
+        fi
+
+        # すべてのin_progressタスクをpendingに戻す
+        local in_progress_count=$(jq '[.tasks[] | select(.status == "in_progress")] | length' "$TASKS_FILE" 2>/dev/null || echo "0")
+        if [[ "$in_progress_count" -gt 0 ]]; then
+            jq '(.tasks[] | select(.status == "in_progress")) |= (.status = "pending" | .started_at = null)' "$TASKS_FILE" > "/tmp/tasks_reset_$$.tmp"
+            mv "/tmp/tasks_reset_$$.tmp" "$TASKS_FILE"
+            printf "%b" "${GREEN}✓ $in_progress_count 個のタスクをpendingに戻しました${NC}\n"
+        fi
+
+        printf "%b" "${GREEN}すべてのエージェントを停止しました${NC}\n"
     fi
 }
 
 # エージェントを再起動
 restart_agent() {
     local agent="$1"
+    local timeout="${2:-}"  # オプション: タイムアウト秒数
 
     printf "%b" "${CYAN}エージェント '$agent' を再起動中...${NC}\n"
+    if [[ -n "$timeout" ]]; then
+        printf "%b" "${CYAN}  タイムアウト設定: ${timeout}秒${NC}\n"
+    fi
     echo ""
 
-    # まず停止を試みる
-    stop_agent "$agent" 2>/dev/null || true
+    # まず停止を試みる（出力を抑制）
+    stop_agent "$agent" >/dev/null 2>&1 || true
 
     # 少し待機
     sleep 1
 
     # 再起動
     printf "%b" "${CYAN}再起動中...${NC}\n"
-    launch_agents_background $(jq -r --arg agent "$agent" '.tasks[] | select(.agent == $agent and .status == "pending") | .id' "$TASKS_FILE" 2>/dev/null || echo "")
+
+    # pendingタスクのIDを取得
+    local pending_tasks=$(jq -r --arg agent "$agent" '.tasks[] | select(.agent == $agent and .status == "pending") | .id' "$TASKS_FILE" 2>/dev/null || echo "")
+
+    # failedタスクがある場合は、常にpendingに戻す
+    local failed_tasks=$(jq -r --arg agent "$agent" '[.tasks[] | select(.agent == $agent and .status == "failed")] | .id' "$TASKS_FILE" 2>/dev/null || echo "")
+    if [[ -n "$failed_tasks" ]]; then
+        jq --arg agent "$agent" '(.tasks[] | select(.agent == $agent and .status == "failed")) |= (.status = "pending" | .started_at = null)' "$TASKS_FILE" > "/tmp/tasks_reset_failed_$$.tmp"
+        mv "/tmp/tasks_reset_failed_$$.tmp" "$TASKS_FILE"
+
+        # failedタスクをpendingに戻したので、pendingタスクを再取得
+        pending_tasks=$(jq -r --arg agent "$agent" '.tasks[] | select(.agent == $agent and .status == "pending") | .id' "$TASKS_FILE" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$pending_tasks" ]]; then
+        # pendingタスクがある場合は、そのタスクを指定して起動
+        launch_agents_background $pending_tasks "$timeout"
+    else
+        # pendingタスクがない場合は、エージェントのすべてのタスクを一時的にpendingにして起動
+        local agent_task_count=$(jq --arg agent "$agent" '[.tasks[] | select(.agent == $agent)] | length' "$TASKS_FILE" 2>/dev/null || echo "0")
+
+        if [[ "$agent_task_count" -gt 0 ]]; then
+            # エージェントのin_progressタスクを一時的にpendingにして起動
+            jq --arg agent "$agent" '(.tasks[] | select(.agent == $agent and .status == "in_progress")) |= (.status = "pending" | .started_at = null)' "$TASKS_FILE" > "/tmp/tasks_restart_$$.tmp"
+            mv "/tmp/tasks_restart_$$.tmp" "$TASKS_FILE"
+
+            # pendingタスクを再取得
+            pending_tasks=$(jq -r --arg agent "$agent" '.tasks[] | select(.agent == $agent and .status == "pending") | .id' "$TASKS_FILE" 2>/dev/null || echo "")
+            launch_agents_background $pending_tasks "$timeout"
+        else
+            # エージェントにタスクがない場合は、直接起動
+            launch_agent_direct "$agent" "$timeout"
+        fi
+    fi
 }
 
+# エージェントを直接起動（タスクなしの場合）
+launch_agent_direct() {
+    local agent="$1"
+    local timeout="${2:-}"  # オプション: タイムアウト秒数
+    local PID_DIR="$CLAUDE_DIR/pids"
+    local pid_file="$PID_DIR/${agent}.pid"
+    local log_file="$LOGS_DIR/agent-$(date +%Y-%m-%d).log"
+
+    # 既に実行中でないか確認
+    if [[ -f "$pid_file" ]]; then
+        local existing_pid=$(cat "$pid_file" 2>/dev/null)
+        if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+            printf "%b" "${YELLOW}⚠ $agent は既に実行中です (PID: $existing_pid)${NC}\n"
+            return
+        fi
+    fi
+
+    printf "%b" "${GREEN}起動中: $agent (watchモード)${NC} -> "
+
+    # バックグラウンドでエージェントを起動（watchモード）
+    # タイムアウトが指定されている場合は環境変数を設定
+    if [[ -n "$timeout" ]]; then
+        CLAUDE_TIMEOUT="$timeout" nohup bash "$AGENT_SCRIPT" "$agent" watch >> "$log_file" 2>&1 &
+    else
+        nohup bash "$AGENT_SCRIPT" "$agent" watch >> "$log_file" 2>&1 &
+    fi
+    local agent_pid=$!
+
+    # PIDを記録
+    echo "$agent_pid" > "$pid_file"
+
+    # エージェント情報も記録（watchモードを記録）
+    local agent_info_file="$PID_DIR/${agent}.json"
+    jq -n \
+        --arg agent "$agent" \
+        --argjson pid "$agent_pid" \
+        --arg started_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        --arg mode "watch" \
+        '{agent: $agent, pid: $pid, started_at: $started_at, mode: $mode}' > "$agent_info_file"
+
+    printf "%b" "${GREEN}PID: $agent_pid${NC}\n"
+    printf "%b" "${GREEN}✓ 1個のエージェントをwatchモードで起動しました${NC}\n"
+    echo ""
+    printf "%b" "${CYAN}エージェントは常時待機し、タスクが来たら自動実行します${NC}\n"
+    echo ""
+    printf "%b" "${CYAN}監視コマンド: orch status, orch agents, orch log-tail${NC}\n"
+    printf "%b" "${CYAN}停止コマンド: orch stop <agent>${NC}\n"
+}
 # エージェントを削除（停止 + タスククリア）
 remove_agent() {
     local agent="$1"
@@ -1108,6 +1282,89 @@ remove_agent() {
     else
         printf "%b" "${YELLOW}エージェント '$agent' のタスクはありません${NC}\n"
     fi
+}
+
+# オーケストレーターのリセット（エージェント状態、タスク、ログをクリア）
+reset_orchestrator() {
+    local keep_logs="${1:-false}"
+
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${CYAN}  オーケストレーター・リセット${NC}\n"
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo ""
+
+    # 確認
+    if [[ "$keep_logs" == "true" ]]; then
+        printf "%b" "${YELLOW}ログを保持したまま、以下をリセットします:${NC}\n"
+    else
+        printf "%b" "${YELLOW}以下をリセットします:${NC}\n"
+    fi
+    echo "  • すべてのエージェントプロセスの停止"
+    echo "  • PIDファイルの削除"
+    echo "  • タスクのクリア"
+    if [[ "$keep_logs" == "false" ]]; then
+        echo "  • ログファイルの削除"
+    fi
+    echo ""
+    printf "%b" "${RED}この操作は取り消せません。続行しますか？ (y/N):${NC} "
+
+    local confirm
+    read -r confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        printf "%b" "${YELLOW}キャンセルしました${NC}\n"
+        return 0
+    fi
+
+    echo ""
+    printf "%b" "${CYAN}リセット中...${NC}\n"
+
+    # 1. すべてのエージェントを停止
+    echo "エージェントを停止中..."
+    local PID_DIR="$CLAUDE_DIR/pids"
+    if [[ -d "$PID_DIR" ]]; then
+        for pid_file in "$PID_DIR"/*.pid; do
+            if [[ -f "$pid_file" ]]; then
+                local pid=$(cat "$pid_file" 2>/dev/null)
+                if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                    kill "$pid" 2>/dev/null
+                    printf "%b" "${GREEN}✓${NC} PID $pid を停止\n"
+                fi
+            fi
+        done
+    fi
+
+    # 2. PIDファイルを削除
+    echo "PIDファイルを削除中..."
+    if [[ -d "$PID_DIR" ]]; then
+        rm -f "$PID_DIR"/*.pid 2>/dev/null
+        rm -f "$PID_DIR"/*.json 2>/dev/null
+        printf "%b" "${GREEN}✓${NC} PIDファイルを削除\n"
+    fi
+
+    # 3. タスクをクリア
+    echo "タスクをクリア中..."
+    if [[ -f "$TASKS_FILE" ]]; then
+        jq '{tasks: [], next_id: 1}' "$TASKS_FILE" > "/tmp/tasks_reset_$$.tmp"
+        mv "/tmp/tasks_reset_$$.tmp" "$TASKS_FILE"
+        printf "%b" "${GREEN}✓${NC} タスクをクリア\n"
+    fi
+
+    # 4. ログファイルの削除（オプション）
+    if [[ "$keep_logs" == "false" ]]; then
+        echo "ログファイルを削除中..."
+        if [[ -d "$LOGS_DIR" ]]; then
+            rm -f "$LOGS_DIR"/*.log 2>/dev/null
+            rm -f "$LOGS_DIR"/*.log.gz 2>/dev/null
+            printf "%b" "${GREEN}✓${NC} ログファイルを削除\n"
+        fi
+    else
+        echo "ログファイルは保持されました"
+    fi
+
+    echo ""
+    printf "%b" "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${GREEN}✓ リセット完了${NC}\n"
+    printf "%b" "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 }
 
 # 実行中のエージェント一覧を表示
@@ -1176,6 +1433,104 @@ list_running_agents() {
 # ==============================================================================
 # 既存のタスク管理機能
 # ==============================================================================
+
+# JSONファイルからタスクを読み込んで実行
+load_from_json() {
+    local json_file="${1:-$CLAUDE_DIR/decomposition.json}"
+
+    if [[ ! -f "$json_file" ]]; then
+        printf "%b" "${RED}エラー: JSONファイルが見つかりません: $json_file${NC}\n" >&2
+        printf "%b" "${YELLOW}ヒント: まず 'orch add' コマンドでタスク分解プランを作成してください${NC}\n" >&2
+        return 1
+    fi
+
+    # JSONを読み込み
+    local decomposition_json
+    decomposition_json=$(cat "$json_file")
+
+    # JSONの検証
+    if ! echo "$decomposition_json" | jq empty 2>/dev/null; then
+        printf "%b" "${RED}エラー: JSONファイルが無効です${NC}\n" >&2
+        return 1
+    fi
+
+    # subtasksが存在するか確認
+    local subtask_count=$(echo "$decomposition_json" | jq -r '.subtasks | length' 2>/dev/null)
+    if [[ "$subtask_count" == "null" ]] || [[ "$subtask_count" -eq 0 ]]; then
+        printf "%b" "${RED}エラー: JSONファイルにサブタスクが含まれていません${NC}\n" >&2
+        return 1
+    fi
+
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${CYAN}  JSONからタスクを読み込み${NC}\n"
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo ""
+    printf "%b" "${YELLOW}ファイル: ${json_file}${NC}\n"
+    printf "%b" "${YELLOW}サブタスク数: $subtask_count${NC}\n"
+    echo ""
+
+    # 修正されるタスクを表示
+    printf "%b" "${MAGENTA}以下のタスクを作成します:${NC}\n"
+    echo "$decomposition_json" | jq -r '.subtasks[] | "  - " + .description + " (" + .agent + ")"' 2>/dev/null
+    echo ""
+
+    # タスクを作成
+    local task_ids=()
+    local subtasks=($(echo "$decomposition_json" | jq -c '.subtasks[]' 2>/dev/null))
+
+    for subtask_json in "${subtasks[@]}"; do
+        local subtask_desc=$(echo "$subtask_json" | jq -r '.description')
+        local subtask_agent=$(echo "$subtask_json" | jq -r '.agent')
+        local subtask_deps=$(echo "$subtask_json" | jq -r '
+            if .dependencies == null or (.dependencies | length) == 0 then ""
+            else (.dependencies | map(tostring) | join(","))
+            end')
+
+        local deps_array_json="[]"
+        if [[ -n "$subtask_deps" ]]; then
+            local deps_list=()
+            IFS=',' read -ra dep_indices <<< "$subtask_deps"
+            for dep_idx in "${dep_indices[@]}"; do
+                if [[ $dep_idx -ge 0 ]] && [[ $dep_idx -lt ${#task_ids[@]} ]]; then
+                    deps_list+=("${task_ids[$dep_idx]}")
+                fi
+            done
+            if [[ ${#deps_list[@]} -gt 0 ]]; then
+                # JSON配列を生成（数値配列）
+                deps_array_json=$(printf '%s\n' "${deps_list[@]}" | jq -R 'split("\n") | map(tonumber) | map(select(. != null))' | jq -s '.')
+            fi
+        fi
+
+        # タスクを追加
+        local task_id=$(jq -r '.next_id' "$TASKS_FILE")
+        add_task "$subtask_desc" "$subtask_agent" "normal" "$deps_array_json" > /dev/null 2>&1 || true
+        task_ids+=("$task_id")
+
+        # 進捗を表示
+        local task_info=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE" 2>/dev/null)
+        local task_status=$(echo "$task_info" | jq -r '.status')
+        local task_agent=$(echo "$task_info" | jq -r '.agent')
+        local agent_color=""
+        case "$task_agent" in
+            "frontend") agent_color="$BLUE";;
+            "backend") agent_color="$GREEN";;
+            "tests") agent_color="$YELLOW";;
+            "docs") agent_color="$MAGENTA";;
+            *) agent_color="$CYAN";;
+        esac
+        printf "%b" "${agent_color}✓${NC} [#$task_id] $subtask_desc\n"
+    done
+
+    echo ""
+    printf "%b" "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${GREEN}$subtask_count 個のタスクを作成しました${NC}\n"
+    printf "%b" "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo ""
+    printf "%b" "${CYAN}次のステップ:${NC}\n"
+    printf "%b" "  ${GREEN}orch status${NC}         # タスク状況を確認\n"
+    printf "%b" "  ${GREEN}orch launch${NC}         # エージェントを起動\n"
+    printf "%b" "  ${GREEN}orch watch <agent>${NC}  # エージェントを自動監視モードで起動\n"
+}
 
 # タスク追加（手動エージェント指定）
 add_task() {
@@ -1315,6 +1670,46 @@ fail_task() {
        "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
     printf "%b" "${RED}✗ タスク [ID: $task_id] が失敗しました: $reason${NC}\n"
+}
+
+# タスクリセット（pendingに戻す）
+reset_task() {
+    local task_id=$1
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # タスク情報を取得
+    local task_info=$(jq --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$task_info" ]]; then
+        printf "%b" "${RED}エラー: タスクID $task_id が見つかりません${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(jq -r '.description' <<< "$task_info")
+    local task_status=$(jq -r '.status' <<< "$task_info")
+    local task_agent=$(jq -r '.agent' <<< "$task_info")
+
+    # 既にpendingの場合はメッセージのみ
+    if [[ "$task_status" == "pending" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は既にpending状態です${NC}\n"
+        return 0
+    fi
+
+    # ログ記録
+    orch_log "INFO" "タスクリセット: [#$task_id] $task_desc (担当: $task_agent) 状態: $task_status -> pending"
+
+    # タスクをpendingに戻す
+    jq --argjson id "$task_id" \
+       --arg timestamp "$timestamp" \
+       '.tasks |= map(if .id == $id then
+           .status = "pending" |
+           .started_at = null |
+           .updated_at = $timestamp |
+           .notes += [{"type": "info", "text": "タスクをpendingにリセットしました", "timestamp": $timestamp}]
+       else . end)' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    printf "%b" "${GREEN}✓ タスク [ID: $task_id] をpendingにリセットしました: $task_desc${NC}\n"
 }
 
 # タスク状況表示
@@ -1750,6 +2145,7 @@ ${YELLOW}コマンド:${NC}
     ${GREEN}start <task_id>${NC}              タスク開始
     ${GREEN}complete <task_id> [note]${NC}    タスク完了（ノート付き）
     ${GREEN}fail <task_id> <reason>${NC}      タスク失敗
+    ${GREEN}reset <task_id>${NC}              タスクをpendingにリセット
     ${GREEN}agent <agent_name>${NC}           エージェント別タスク詳細表示
     ${GREEN}next${NC}                         次に実行可能なタスク表示
     ${GREEN}launch${NC}                       未着手タスクのエージェントを起動
@@ -1793,6 +2189,14 @@ ${YELLOW}Worktree 操作:${NC}
 ${YELLOW}Worktree モード:${NC}
     ${GREEN}USE_WORKTREE=true orch watch <agent>${NC}
                                        Worktree を使用して自動監視
+
+${YELLOW}管理:${NC}
+    ${GREEN}reset [--keep-logs]${NC}         オーケストレーターをリセット
+                                       すべてのエージェントを停止し、タスクをクリア
+                                       --keep-logs: ログファイルを保持
+    ${GREEN}stop <agent|all>${NC}            エージェントを停止
+    ${GREEN}restart <agent>${NC}             エージェントを再起動
+    ${GREEN}list${NC}                        実行中のエージェントを一覧表示
 
 ${YELLOW}自動振り分け例:${NC}
     $0 add "ユーザー認証機能の実装"
@@ -2289,11 +2693,42 @@ case "${1:-}" in
     restart)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: エージェント名を指定してください${NC}\n"
-            echo "使用方法: $0 restart <agent>"
+            echo "使用方法: $0 restart <agent> [timeout]"
+            echo "例:"
+            echo "  $0 restart backend       # デフォルトタイムアウトで再起動"
+            echo "  $0 restart backend 1200  # タイムアウト1200秒で再起動"
+            echo "  $0 restart all           # すべてのエージェントを再起動"
             exit 1
         fi
 
-        restart_agent "$2"
+        # タイムアウト引数のチェック（数値のみ）
+        timeout=""
+        if [[ -n "$3" ]] && [[ "$3" =~ ^[0-9]+$ ]]; then
+            timeout="$3"
+        fi
+
+        if [[ "$2" == "all" ]]; then
+            # すべてのエージェントを再起動
+            agents=("frontend" "backend" "tests" "docs")
+            for agent in "${agents[@]}"; do
+                restart_agent "$agent" "$timeout"
+            done
+        else
+            restart_agent "$2" "$timeout"
+        fi
+        ;;
+    reset)
+        # タスクIDが指定されている場合は個別タスクリセット
+        if [[ -n "$2" ]] && [[ "$2" != "--keep-logs" ]]; then
+            reset_task "$2"
+        else
+            # オプション: --keep-logs を指定するとログを保持
+            local keep_logs="false"
+            if [[ "$2" == "--keep-logs" ]]; then
+                keep_logs="true"
+            fi
+            reset_orchestrator "$keep_logs"
+        fi
         ;;
     remove)
         if [[ -z "$2" ]]; then
@@ -2309,6 +2744,13 @@ case "${1:-}" in
         ;;
     ps)
         list_running_agents
+        ;;
+    load)
+        if [[ -n "$2" ]]; then
+            load_from_json "$2"
+        else
+            load_from_json
+        fi
         ;;
     add)
         if [[ -z "$2" ]]; then

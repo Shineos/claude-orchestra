@@ -1,0 +1,80 @@
+name: Acceptance Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Acceptance Tests
+    runs-on: macos-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        brew install bats-core jq
+
+    - name: Verify installations
+      run: |
+        echo "Bats version:"
+        bats --version
+        echo "jq version:"
+        jq --version
+        echo "Bash version:"
+        bash --version
+
+    - name: Run acceptance tests
+      run: |
+        ./tests/run_tests.sh
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          tests/report/
+          *.log
+        retention-days: 7
+
+  test-linux:
+    name: Run Acceptance Tests (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats jq
+
+    - name: Verify installations
+      run: |
+        echo "Bats version:"
+        bats --version
+        echo "jq version:"
+        jq --version
+        echo "Bash version:"
+        bash --version
+
+    - name: Run acceptance tests
+      run: |
+        ./tests/run_tests.sh
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-linux
+        path: |
+          tests/report/
+          *.log
+        retention-days: 7

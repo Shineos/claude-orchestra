@@ -140,10 +140,12 @@ alias agent="bash ./.claude/agent.sh"
 |---------|------|
 | `orch add "タスク説明"` | タスク追加（自動振り分け） |
 | `orch add "タスク" <agent> <priority> [deps]` | タスク追加（手動指定） |
+| `orch load <json_file>` | JSONファイルからタスクを読み込み |
 | `orch status` | タスク状況一覧 |
 | `orch start <id>` | タスク開始 |
 | `orch complete <id>` | タスク完了 |
 | `orch fail <id> "理由"` | タスク失敗 |
+| `orch reset <id>` | タスクをpendingにリセット |
 | `orch next` | 次に実行可能なタスク表示 |
 
 ### エージェント操作
@@ -157,7 +159,7 @@ alias agent="bash ./.claude/agent.sh"
 | `orch monitor-agents` | エージェント別リアルタイム監視 |
 | `orch list` / `orch ps` | 実行中のエージェント一覧 |
 | `orch stop <agent\|all>` | エージェントを停止 |
-| `orch restart <agent>` | エージェントを再起動 |
+| `orch restart <agent\|all>` | エージェントを再起動 |
 | `orch remove <agent>` | エージェントを停止してタスク削除 |
 
 ### 自動監視モード
@@ -245,8 +247,39 @@ AIでタスクを分析中...
 |-------|------|
 | **Y** | 提案されたプランを承認してタスクを作成 |
 | **N** | プランを拒否して再分解（フィードバックを入力可能、最大3回） |
-| **E** | 手動編集モードで JSON を直接編集 |
+| **E** | JSONファイルを出力して手動編集モードへ |
 | **Q** | キャンセルして何もしない |
+
+### 編集モード（Eオプション）
+
+「E」を選択すると、分解結果がJSONファイルとして保存され、エディタで直接編集できます。
+
+**実行例:**
+
+```
+選択: E
+
+".claude/decomposition.json"ファイルを手動で編集してください。
+編集後、`orch load .claude/decomposition.json` コマンド実行してください
+```
+
+**手順:**
+
+1. 「E」を選択すると `.claude/decomposition.json` が保存される
+2. お好みのエディタでJSONファイルを編集
+3. 編集完了後に以下のコマンドでタスクを作成:
+
+```bash
+# JSONファイルを指定してタスクを作成
+orch load .claude/decomposition.json
+```
+
+**編集可能な項目:**
+
+- `description`: サブタスクの説明
+- `agent`: 担当エージェント（frontend/backend/tests/docs）
+- `dependencies`: 依存するサブタスクのインデックス配列
+- `rationale`: 担当理由
 
 ### 基本的なワークフロー
 
@@ -375,9 +408,14 @@ tmux attach -t agents
 
 ### タイムアウト設定
 
-エージェントがタスクを実行する最大時間を設定できます。デフォルトは10分です。
+エージェントがタスクを実行する最大時間を設定できます。デフォルトは10分（600秒）です。
 
 ```bash
+# restartコマンドでタイムアウトを指定
+orch restart backend 1200     # 20分（1200秒）
+orch restart frontend 900     # 15分（900秒）
+orch restart all 1800         # すべてのエージェントを30分で再起動
+
 # 環境変数で設定（秒単位）
 export CLAUDE_TIMEOUT=300  # 5分
 
@@ -428,13 +466,14 @@ orch status
 
 ### タスクをリセットする
 
-タスクが「実行中」のまま停止した場合は、手動でリセットできます。
+タスクが「実行中」や「失敗」のまま停止した場合は、手動でリセットできます。
 
 ```bash
 # タスクをpendingに戻す
-jq '(.tasks[] | select(.id == <ID>)) |= (.status = "pending" | .started_at = null)' \
-  .claude/tasks.json > /tmp/tasks.tmp && mv /tmp/tasks.tmp .claude/tasks.json
+orch reset <ID>
 ```
+
+また、`orch restart all` を実行すると、`failed` 状態のタスクも自動的に `pending` に戻されます。
 
 ---
 
