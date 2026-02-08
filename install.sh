@@ -84,8 +84,8 @@ printf "%b" "${GREEN}✓ ディレクトリを作成しました${NC}\n"
 # ------------------------------------------------------------------
 
 # 1. agents ディレクトリ
-if [[ -d "$TEMPLATE_DIR/agents" ]]; then
-    cp -r "$TEMPLATE_DIR/agents" "$CLAUDE_DIR/"
+if [[ -d "$TEMPLATE_DIR/.claude/agents" ]]; then
+    cp -r "$TEMPLATE_DIR/.claude/agents" "$CLAUDE_DIR/"
     printf "%b" "${GREEN}✓ agents ディレクトリをコピーしました${NC}\n"
 else
     printf "%b" "${RED}エラー: agents ディレクトリが見つかりません${NC}\n"
@@ -93,10 +93,10 @@ else
 fi
 
 # 2. scripts ディレクトリ
-if [[ -d "$TEMPLATE_DIR/scripts" ]]; then
-    cp -r "$TEMPLATE_DIR/scripts" "$CLAUDE_DIR/"
+if [[ -d "$TEMPLATE_DIR/.claude/scripts" ]]; then
+    cp -r "$TEMPLATE_DIR/.claude/scripts" "$CLAUDE_DIR/"
     printf "%b" "${GREEN}✓ scripts ディレクトリをコピーしました${NC}\n"
-    
+
     # 実行権限を付与
     chmod +x "$CLAUDE_DIR/scripts/"*.sh
 else
@@ -105,8 +105,8 @@ else
 fi
 
 # 3. prompts ディレクトリ
-if [[ -d "$TEMPLATE_DIR/prompts" ]]; then
-    cp -r "$TEMPLATE_DIR/prompts" "$CLAUDE_DIR/"
+if [[ -d "$TEMPLATE_DIR/.claude/prompts" ]]; then
+    cp -r "$TEMPLATE_DIR/.claude/prompts" "$CLAUDE_DIR/"
     printf "%b" "${GREEN}✓ prompts ディレクトリをコピーしました${NC}\n"
 fi
 
