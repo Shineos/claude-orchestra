@@ -1,7 +1,10 @@
 **/logs/*
 **/tmp/*
-**/tests/*
 .tmp/*
+
+# テストログとレポート
+tests/report/
+tests/*.log
 
 # バックアップファイル
 *.bak
