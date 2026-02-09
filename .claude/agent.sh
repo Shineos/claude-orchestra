@@ -59,6 +59,160 @@ log() {
 # タスク管理関数
 # ==============================================================================
 
+# 契約ファイルを読み込み
+load_contract() {
+    local contract_path="$1"
+    if [[ -n "$contract_path" && "$contract_path" != "null" && -f "$contract_path" ]]; then
+        cat "$contract_path"
+    fi
+}
+
+# ==============================================================================
+# コンテキスト読み込み関数
+# ==============================================================================
+
+# ADRファイルを読み込み
+load_adr() {
+    local adr_id="$1"
+    local adr_dir="$SCRIPT_DIR/context/architectural_decisions"
+
+    # ADRファイルを検索
+    for adr_file in "$adr_dir"/*.md; do
+        [[ -f "$adr_file" ]] || continue
+        [[ "$adr_file" == *TEMPLATE.md ]] && continue
+
+        local filename=$(basename "$adr_file")
+        local file_id=$(echo "$filename" | cut -d'-' -f1)
+
+        if [[ "$file_id" == "$(printf "%03d" "$adr_id")" ]] || [[ "$file_id" == "$adr_id" ]]; then
+            cat "$adr_file"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# コーディング規約を読み込み
+load_coding_conventions() {
+    local conventions_file="$SCRIPT_DIR/context/coding_conventions.md"
+    if [[ -f "$conventions_file" ]]; then
+        cat "$conventions_file"
+    fi
+}
+
+# 現在状態を読み込み
+load_current_state() {
+    local state_file="$SCRIPT_DIR/context/current_state.md"
+    if [[ -f "$state_file" ]]; then
+        cat "$state_file"
+    fi
+}
+
+# プロジェクト用語集を読み込み
+load_glossary() {
+    local glossary_file="$SCRIPT_DIR/context/project_glossary.md"
+    if [[ -f "$glossary_file" ]]; then
+        cat "$glossary_file"
+    fi
+}
+
+# コンテキストを構築して出力
+# タスクに関連するADR、コーディング規約、現在状態を統合
+load_context() {
+    local task_id="$1"
+
+    # タスクの関連ADRを取得
+    local related_adrs=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .related_adr[]? // empty' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    local context=""
+    local has_context=false
+
+    # コーディング規約（常に読み込み）
+    local conventions=$(load_coding_conventions)
+    if [[ -n "$conventions" ]]; then
+        context+="## プロジェクトのコーディング規約"$'\n\n'
+        context+="$conventions"$'\n\n'
+        has_context=true
+    fi
+
+    # 関連ADRを読み込み
+    if [[ -n "$related_adrs" ]]; then
+        context+="## 関連するアーキテクチャ決定記録 (ADR)"$'\n\n'
+        while IFS= read -r adr_id; do
+            [[ -z "$adr_id" ]] && continue
+            local adr_content=$(load_adr "$adr_id")
+            if [[ -n "$adr_content" ]]; then
+                context+="### ADR #$adr_id"$'\n\n'
+                context+="$adr_content"$'\n\n'
+            fi
+        done <<< "$related_adrs"
+        has_context=true
+    fi
+
+    # 現在状態（最新情報のみを読み込み）
+    local state=$(load_current_state)
+    if [[ -n "$state" ]]; then
+        context+="## プロジェクトの現在状態"$'\n\n'
+        # 実装済み機能と技術スタックのみ抽出（簡略版）
+        context+="<details>"$'\n'
+        context+="<summary>現在状態を展開</summary>"$'\n\n'
+        context+="$state"$'\n\n'
+        context+="</details>"$'\n\n'
+        has_context=true
+    fi
+
+    # 用語集が必要な場合のみ読み込み（プロンプトが長くなりすぎるため）
+    # タスクdescriptionに専門用語が含まれる場合は別途判断
+
+    if [[ "$has_context" == "true" ]]; then
+        echo "$context"
+    fi
+}
+
+# 検証ステップを実行
+run_verification_steps() {
+    local task_id="$1"
+
+    # 検証ステップを取得
+    local verification_steps=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .verification_steps[]?' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$verification_steps" ]]; then
+        return 0  # 検証ステップなし = 成功
+    fi
+
+    log "INFO" "検証ステップを実行中..."
+
+    while IFS= read -r step; do
+        [[ -z "$step" ]] && continue
+        log "INFO" "  実行: $step"
+
+        if ! eval "$step" > /dev/null 2>&1; then
+            log "ERROR" "検証ステップ失敗: $step"
+            return 1
+        fi
+    done <<< "$verification_steps"
+
+    log "INFO" "検証ステップ完了"
+    return 0
+}
+
+# タスクステータスを更新
+update_task_status() {
+    local task_id="$1"
+    local new_status="$2"
+
+    local updated_tasks=$(jq --argjson id "$task_id" \
+        --arg status "$new_status" \
+        '(.tasks[] | select(.id == $id)) |= .status = $status' \
+        "$TASKS_FILE")
+    echo "$updated_tasks" > "$TASKS_FILE"
+}
+
 # エージェントの次のタスクを取得
 get_next_task() {
     local agent="$1"
@@ -152,6 +306,19 @@ execute_task() {
     local task_desc="$3"
     local system_prompt=$(load_agent "$agent")
 
+    # タスク情報を取得（拡張フィールド対応）
+    local contract_path=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .contract // "null"' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    local deliverables=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .deliverables[]? // empty' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    local dod=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .definition_of_done[]? // empty' \
+        "$TASKS_FILE" 2>/dev/null)
+
     printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     printf "%b" "${CYAN}  タスク実行中${NC}\n"
     printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
@@ -159,6 +326,9 @@ execute_task() {
     printf "%b" "${YELLOW}タスクID: ${NC}#$task_id\n"
     printf "%b" "${YELLOW}エージェント: ${NC}$agent\n"
     printf "%b" "${YELLOW}説明: ${NC}$task_desc\n"
+    if [[ -n "$contract_path" && "$contract_path" != "null" ]]; then
+        printf "%b" "${BLUE}契約: ${NC}$contract_path\n"
+    fi
     echo ""
     printf "%b" "${BLUE}Claude Codeで実行中...${NC}\n"
     echo ""
@@ -167,6 +337,45 @@ execute_task() {
 
     # Claude CLIでタスクを実行（非対話モード）
     local prompt="${system_prompt}"$'\n\n'
+
+    # コンテキスト情報を読み込み（ADR、コーディング規約、現在状態）
+    local context=$(load_context "$task_id")
+    if [[ -n "$context" ]]; then
+        prompt+="## プロジェクトコンテキスト"$'\n\n'
+        prompt+="以下は、このプロジェクトの重要な情報です。作業する前に理解してください。"$'\n\n'
+        prompt+="$context"$'\n\n'
+        prompt+="---"$'\n\n'
+        log "INFO" "コンテキストを読み込みました"
+    fi
+
+    # 契約情報をプロンプトに追加
+    if [[ -n "$contract_path" && "$contract_path" != "null" ]]; then
+        local contract_content=$(load_contract "$contract_path")
+        if [[ -n "$contract_content" ]]; then
+            prompt+="## 契約仕様${contract_path}"$'\n\n'
+            prompt+="$contract_content"$'\n\n'
+            prompt+="上記の仕様に従って実装してください。"$'\n\n'
+        fi
+    fi
+
+    # Deliverablesをプロンプトに追加
+    if [[ -n "$deliverables" ]]; then
+        prompt+="## 期待する成果物"$'\n'
+        while IFS= read -r deliv; do
+            [[ -n "$deliv" ]] && prompt+="  - $deliv"$'\n'
+        done <<< "$deliverables"
+        prompt+=$'\n'
+    fi
+
+    # 完了定義(DoD)をプロンプトに追加
+    if [[ -n "$dod" ]]; then
+        prompt+="## 完了基準"$'\n'
+        while IFS= read -r criterion; do
+            [[ -n "$criterion" ]] && prompt+="  - [ ] $criterion"$'\n'
+        done <<< "$dod"
+        prompt+=$'\n'
+    fi
+
     prompt+="タスク: ${task_desc}"$'\n\n'
     prompt+="プロジェクトルート: ${PROJECT_ROOT}"$'\n\n'
     prompt+="注意事項:"$'\n'
@@ -225,14 +434,45 @@ execute_task() {
     log "INFO" "Claude CLI実行完了: 終了コード=$exit_code, 所要時間=${elapsed}秒"
 
     if [[ $exit_code -eq 0 ]]; then
-        # タスクを完了
-        complete_task "$task_id" "success"
-        log "INFO" "完了: [#$task_id] $task_desc (所要時間: ${elapsed}秒)"
-        printf "%b" "${GREEN}✓ タスク完了: #$task_id${NC}\n"
-        return 0
+        # Pre-Review自動チェック
+        local pre_review_script="$SCRIPT_DIR/pre-review-check.sh"
+        if [[ -f "$pre_review_script" ]]; then
+            log "INFO" "Pre-Reviewチェック実行中..."
+            if bash "$pre_review_script" "$task_id" "$agent"; then
+                # 自動チェック成功 -> review_neededに移行
+                update_task_status "$task_id" "review_needed"
+                log "INFO" "レビュー待ちに移行: [#$task_id]"
+                printf "%b" "${BLUE}⏳ レビュー待ち: #$task_id${NC}\n"
+                return 0
+            else
+                # 自動チェック失敗 -> rejectedに移行
+                update_task_status "$task_id" "rejected"
+                fail_task "$task_id" "Pre-Reviewチェック失敗"
+                log "ERROR" "Pre-Reviewチェック失敗: [#$task_id]"
+                printf "%b" "${RED}✗ Pre-Reviewチェック失敗: #$task_id${NC}\n"
+                return 1
+            fi
+        fi
+
+        # 検証ステップを実行
+        if run_verification_steps "$task_id"; then
+            # Pre-Reviewチェックがない場合は完了
+            update_task_status "$task_id" "review_needed"
+            log "INFO" "レビュー待ちに移行: [#$task_id]"
+            printf "%b" "${BLUE}⏳ レビュー待ち: #$task_id${NC}\n"
+            return 0
+        else
+            # 検証失敗 -> rejectedステータス
+            update_task_status "$task_id" "rejected"
+            fail_task "$task_id" "検証ステップ失敗"
+            log "ERROR" "検証失敗: [#$task_id]"
+            printf "%b" "${RED}✗ 検証ステップ失敗: #$task_id${NC}\n"
+            return 1
+        fi
     elif [[ $exit_code -eq 142 ]] || [[ $exit_code -eq 124 ]]; then
         # タイムアウト（SIGALRMは142=128+14）
         local timeout_msg="Claude Codeが${CLAUDE_TIMEOUT}秒でタイムアウトしました"
+        update_task_status "$task_id" "rejected"
         fail_task "$task_id" "$timeout_msg"
         log "ERROR" "タイムアウト: [#$task_id] $timeout_msg"
         printf "%b" "${RED}✗ タスク失敗: #$task_id - ${timeout_msg}${NC}\n"
@@ -240,6 +480,7 @@ execute_task() {
         return 1
     else
         # タスクを失敗
+        update_task_status "$task_id" "rejected"
         fail_task "$task_id" "Claude Code実行エラー (exit: $exit_code)"
         log "ERROR" "エラー: [#$task_id] Claude Code実行エラー (exit: $exit_code)"
         printf "%b" "${RED}✗ タスク失敗: #$task_id${NC}\n"
@@ -368,8 +609,10 @@ show_help() {
     echo "使用方法: ./agent.sh <エージェント> [モード]"
     echo ""
     echo "エージェント:"
+    echo "  ${CYAN}architect${NC}     - システム設計・インターフェース契約"
     echo "  ${CYAN}frontend${NC}      - フロントエンド開発"
     echo "  ${CYAN}backend${NC}       - バックエンド開発"
+    echo "  ${CYAN}reviewer${NC}      - コードレビュー・品質保証"
     echo "  ${CYAN}tests${NC}         - テスト作成・実行"
     echo "  ${CYAN}docs${NC}          - ドキュメント作成"
     echo ""
@@ -379,9 +622,10 @@ show_help() {
     echo "  ${CYAN}watch <worktree>${NC} - Worktreeでwatchモード"
     echo ""
     echo "例:"
+    echo "  ./agent.sh architect"
     echo "  ./agent.sh frontend"
     echo "  ./agent.sh backend watch"
-    echo "  ./agent.sh frontend worktree"
+    echo "  ./agent.sh reviewer"
     echo ""
 }
 
@@ -393,7 +637,7 @@ AGENT_NAME="${1:-}"
 AGENT_MODE="${2:-}"
 
 case "$AGENT_NAME" in
-    frontend|backend|tests|docs)
+    architect|frontend|backend|tests|docs|reviewer)
         if [[ "$AGENT_MODE" == "watch" ]]; then
             run_watch_mode "$AGENT_NAME"
         else
