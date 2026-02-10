@@ -786,7 +786,9 @@ add_task_auto() {
 
     # 確認された分解からタスクを作成
     local task_ids=()
-    local subtasks=($(echo "$decomposition_json" | jq -c '.subtasks[]'))
+
+    # Use mapfile to safely read JSON objects (avoids word splitting)
+    mapfile -t subtasks < <(echo "$decomposition_json" | jq -c '.subtasks[]')
 
     for subtask_json in "${subtasks[@]}"; do
         local subtask_desc=$(echo "$subtask_json" | jq -r '.description')
@@ -850,8 +852,8 @@ subtasks_array_to_json() {
         local desc="${subtasks[$i]}"
         local agent="${subtasks[$i+1]}"
 
-        # JSONエスケープ
-        desc=$(echo "$desc" | jq -Rs .)
+        # JSONエスケープ (use printf to avoid trailing newline)
+        desc=$(printf "%s" "$desc" | jq -Rs .)
 
         json+="{\"description\":$desc,\"agent\":\"$agent\",\"rationale\":\"ルールベース判定\",\"dependencies\":[]}"
 
@@ -2320,6 +2322,8 @@ ${YELLOW}ログ:${NC}
     ${GREEN}logs-errors${NC}                 エラーログのみを一覧表示
 
 ${YELLOW}TUI (Terminal UI):${NC}
+    ${GREEN}interactive${NC}                  インタラクティブTUIを起動
+                                       vim風キーバインドでタスク管理
     ${GREEN}dashboard [--watch|--loop]${NC}  メインダッシュボードを表示
                                        --watch: 5秒ごと自動更新
                                        --loop: Enterで更新
@@ -3629,6 +3633,15 @@ case "${1:-}" in
         fi
 
         bash "$_tui_script" "$@"
+        ;;
+    interactive|i)
+        # インタラクティブTUIを起動
+        if [[ -f "$SCRIPT_DIR/tui-interactive.sh" ]]; then
+            bash "$SCRIPT_DIR/tui-interactive.sh" "$@"
+        else
+            printf "%b" "${RED}エラー: tui-interactive.shが見つかりません${NC}\n"
+            exit 1
+        fi
         ;;
     *)
         printf "%b" "${RED}エラー: 不明なコマンド '$1'${NC}\n"

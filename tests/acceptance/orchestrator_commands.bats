@@ -4,8 +4,16 @@
 load '../helpers/bats_helper'
 
 setup() {
-    # Call parent setup
-    setup
+    # Backup existing files (if they exist)
+    if [[ -f "$TASKS_FILE" ]]; then
+        cp "$TASKS_FILE" "$TASKS_FILE.bak"
+    fi
+    if [[ -f "$APPROVALS_FILE" ]]; then
+        cp "$APPROVALS_FILE" "$APPROVALS_FILE.bak"
+    fi
+    # Kill any running agents
+    kill_running_agents
+    # Always initialize with empty tasks for clean test state
     init_empty_tasks
     # Enable auto-confirm to bypass interactive prompts
     export ORCH_AUTO_CONFIRM=yes
@@ -16,8 +24,15 @@ setup() {
 }
 
 teardown() {
-    # Call parent teardown
-    teardown
+    # Restore backups and cleanup (from bats_helper)
+    if [[ -f "$TASKS_FILE.bak" ]]; then
+        mv "$TASKS_FILE.bak" "$TASKS_FILE"
+    fi
+    if [[ -f "$APPROVALS_FILE.bak" ]]; then
+        mv "$APPROVALS_FILE.bak" "$APPROVALS_FILE"
+    fi
+    kill_running_agents
+    cleanup_test_worktrees
 }
 
 # =============================================================================

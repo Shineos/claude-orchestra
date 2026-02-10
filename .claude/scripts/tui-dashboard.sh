@@ -47,7 +47,7 @@ get_task_stats() {
         in_progress: ([.tasks[] | select(.status == "in_progress")] | length),
         pending: ([.tasks[] | select(.status == "pending")] | length),
         review_needed: ([.tasks[] | select(.status == "review_needed")] | length),
-        rejected: ([.tasks[] | select(.status == "rejected")] | length)
+        rejected: ([.tasks[] | select(.status == "rejected" or .status == "failed")] | length)
     }' "$TASKS_FILE" 2>/dev/null || echo '{"total":0,"completed":0,"in_progress":0,"pending":0,"review_needed":0,"rejected":0}'
 }
 
@@ -190,7 +190,7 @@ draw_dashboard() {
                 ;;
         esac
 
-        local agent_name_cap=$(echo "$name" | sed 's/./\U&/')
+        local agent_name_cap="${name^}"
         printf "  ${status_color}${status_icon}${NC} ${BOLD}%-10s${NC}" "$agent_name_cap"
 
         if [[ "$status" == "active" && -n "$task" ]]; then

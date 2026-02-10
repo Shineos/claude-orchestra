@@ -58,7 +58,8 @@ Claude Code を活用したマルチエージェントシステム。Orchestrato
 - 🚀 **コピーするだけ** - `.claude-template` をプロジェクトにコピーするだけ
 - 🤖 **AIタスク分解** - Claude AI がタスクを自動分解し、適切なエージェントを割り当て
 - ✂️ **ユーザー確認フロー** - 分解結果を確認して承認・修正可能
-- 📺 **リアルタイムモニタリング** - 各エージェントの作業状態を監視
+- 📺 **TUI ダッシュボード** - ターミナルベースの美しいダッシュボードとタスクボード
+- 📊 **リアルタイムログ監視** - エージェントのログをリアルタイムで監視
 - 🔄 **並列実行対応** - 複数エージェントを同時稼働
 
 詳細な仕様については [docs/specification.md](docs/specification.md) を参照してください。
@@ -123,8 +124,19 @@ bash .claude/scripts/orchestrator.sh status
 `.zshrc` または `.bashrc` に追加：
 
 ```bash
+# Orchestrator コマンド
 alias orch="bash ./.claude/scripts/orchestrator.sh"
+
+# Agent コマンド
 alias agent="bash ./.claude/agent.sh"
+
+# TUI ダッシュボード（便利なエイリアス）
+alias orch-dash="bash ./.claude/scripts/orchestrator.sh dashboard"
+alias orch-board="bash ./.claude/scripts/orchestrator.sh board"
+
+# ログ監視
+alias orch-logs="bash ./.claude/scripts/orchestrator.sh logs"
+alias orch-follow="bash ./.claude/scripts/orchestrator.sh logs -f"
 
 # AI を無効化してルールベースのみを使用する場合
 # export USE_AI=false
@@ -317,16 +329,56 @@ orch wait 3
 
 | コマンド | 説明 |
 |---------|------|
-| `orch logs` | エージェントのログを表示 |
-| `orch log-tail` | ログをリアルタイム監視 |
+| `orch logs` | エージェントのログを表示（最新20件） |
+| `orch logs -f` | ログをリアルタイム監視（フォローモード） |
+| `orch logs -f <agent>` | エージェント指定でリアルタイム監視 |
+| `orch logs -n <N>` | 表示するログ行数を指定 |
+| `orch logs -e` | エラーログのみ表示 |
+| `orch log-tail` | ログをリアルタイム監視（レガシー） |
 
 ```bash
 # 今日のログを確認
 orch logs
 
 # ログをリアルタイムで監視
-orch log-tail
+orch logs -f
+
+# Frontendエージェントのログを監視
+orch logs -f frontend
+
+# エラーのみ監視
+orch logs -f -e
 ```
+
+### TUI ダッシュボード
+
+| コマンド | 説明 |
+|---------|------|
+| `orch dashboard` / `orch ui` | メインダッシュボードを表示 |
+| `orch board` / `orch taskboard` | タスクボード（カンバン形式）を表示 |
+| `orch dashboard --watch` | ダッシュボードを自動更新（5秒ごと） |
+| `orch board --watch` | タスクボードを自動更新（5秒ごと） |
+
+```bash
+# ダッシュボードを表示
+orch dashboard
+
+# タスクボードを表示
+orch board
+
+# ウォッチモードで監視
+orch dashboard --watch
+
+# ループモード（Enterで更新）
+orch dashboard --loop
+```
+
+**TUI ダッシュボードの機能:**
+
+- 📊 プロジェクト概要（全タスク数、完了数、進行中、保留中）
+- 🤖 エージェント状態（Active/Idle、現在実行中のタスク）
+- 📈 タスク統計（今日完了、失敗、レビュー待、平均完了時間）
+- 🎨 色分け表示（ステータス、優先度、エージェント別）
 
 ### 自動監視モード（デフォルト）
 

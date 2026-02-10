@@ -20,6 +20,9 @@ GRAY='\033[0;37m'
 WHITE='\033[1;37m'
 NC='\033[0m'
 
+# 太字
+BOLD='\033[1m'
+
 # このスクリプトの場所
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
@@ -162,7 +165,13 @@ draw_taskboard() {
         column_tasks_rejected+=("$task_id|$description|$agent|$priority")
     done < /tmp/tasks_rejected_$$.txt
 
-    rm -f /tmp/tasks_pending_$$.txt /tmp/tasks_inprogress_$$.txt /tmp/tasks_review_$$.txt /tmp/tasks_completed_$$.txt /tmp/tasks_rejected_$$.txt
+    get_tasks_by_status "failed" > /tmp/tasks_failed_$$.txt
+    while IFS='|' read -r task_id description agent priority; do
+        [[ -z "$task_id" ]] && continue
+        column_tasks_rejected+=("$task_id|$description|$agent|$priority")
+    done < /tmp/tasks_failed_$$.txt
+
+    rm -f /tmp/tasks_pending_$$.txt /tmp/tasks_inprogress_$$.txt /tmp/tasks_review_$$.txt /tmp/tasks_completed_$$.txt /tmp/tasks_rejected_$$.txt /tmp/tasks_failed_$$.txt
 
     # 最大行数を計算
     local max_lines=0

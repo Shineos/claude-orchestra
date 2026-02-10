@@ -63,7 +63,8 @@ kill_running_agents() {
             local pid=$(jq -r '.pid' "$pid_file" 2>/dev/null || echo "")
             if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
                 kill "$pid" 2>/dev/null || true
-                wait "$pid" 2>/dev/null || true
+                # Note: Removed wait "$pid" to avoid hanging in test environment
+                # Process will be reaped by the system
             fi
             rm -f "$pid_file" 2>/dev/null || true
         fi
@@ -84,20 +85,20 @@ init_empty_tasks() {
     cat > "$TASKS_FILE" <<EOF
 {
   "tasks": [],
-  "next_id": 1,
-  "last_updated": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  "last_id": 0
 }
 EOF
 }
 
 # Add a task via orchestrator
+# Returns the output of the command
 add_task() {
     local task="$1"
     local agent="${2:-}"
     local priority="${3:-normal}"
     local deps="${4:-}"
 
-    run bash "$ORCHESTRATOR" add "$task" ${agent:+$agent} ${priority:+$priority} ${deps:+$deps}
+    bash "$ORCHESTRATOR" add "$task" ${agent:+$agent} ${priority:+$priority} ${deps:+$deps}
 }
 
 # Get task count
@@ -349,12 +350,38 @@ assert_equal() {
 }
 
 # Assert that output contains a substring
+# Supports --partial flag for partial substring match
 assert_output() {
-    local expected="$1"
-    if [[ ! "$output" =~ $expected ]]; then
-        echo "Expected output to contain: '$expected'"
-        echo "Actual output: $output"
-        return 1
+    local expected=""
+    local use_partial=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --partial)
+                use_partial=true
+                shift
+                ;;
+            *)
+                expected="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ "$use_partial" == "true" ]]; then
+        # Partial substring match
+        if [[ "$output" != *"$expected"* ]]; then
+            echo "Expected output to contain: '$expected'"
+            echo "Actual output: $output"
+            return 1
+        fi
+    else
+        # Regex match
+        if [[ ! "$output" =~ $expected ]]; then
+            echo "Expected output to match: '$expected'"
+            echo "Actual output: $output"
+            return 1
+        fi
     fi
 }
 
