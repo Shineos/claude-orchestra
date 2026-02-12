@@ -285,20 +285,22 @@ tui_draw_column() {
     local tasks_json="$6"
     local selected_id="${7:-}"
 
-    # タスクを配列として取得
-    local task_count=$(echo "$tasks_json" | jq 'length')
+    # タスクを配列として取得（空白を削除）
+    local task_count=$(echo "$tasks_json" | jq 'length' 2>/dev/null | tr -d '[:space:]')
+    task_count=${task_count:-0}
 
     # カラム描画
     local current_row=$row
     local task_idx=0
+    local max_row=$((row + height))
 
-    while [[ $current_row -lt $((row + height)) ]]; do
+    while [[ $current_row -lt $max_row ]]; do
         if [[ $task_idx -lt $task_count ]]; then
-            local task=$(echo "$tasks_json" | jq ".[$task_idx]")
-            local task_id=$(echo "$task" | jq -r '.id')
-            local description=$(echo "$task" | jq -r '.description')
-            local agent=$(echo "$task" | jq -r '.agent')
-            local priority=$(echo "$task" | jq -r '.priority')
+            local task=$(echo "$tasks_json" | jq ".[$task_idx]" 2>/dev/null)
+            local task_id=$(echo "$task" | jq -r '.id' 2>/dev/null | tr -d '[:space:]')
+            local description=$(echo "$task" | jq -r '.description' 2>/dev/null)
+            local agent=$(echo "$task" | jq -r '.agent' 2>/dev/null)
+            local priority=$(echo "$task" | jq -r '.priority' 2>/dev/null)
 
             local selected="false"
             [[ "$task_id" == "$selected_id" ]] && selected="true"
@@ -336,7 +338,8 @@ tui_draw_column() {
 
 # メインヘッダーを描画
 tui_draw_header() {
-    local cols=$(tui_get_cols)
+    local cols=$(tui_get_cols | tr -d '[:space:]')
+    cols=${cols:-80}
 
     tui_move 0 0
 
@@ -367,10 +370,16 @@ tui_draw_summary() {
     local width=$3
 
     local stats=$(tui_get_stats)
-    local total=$(echo "$stats" | jq -r '.total')
-    local completed=$(echo "$stats" | jq -r '.completed')
-    local in_progress=$(echo "$stats" | jq -r '.in_progress')
-    local failed=$(echo "$stats" | jq -r '.rejected')
+    local total=$(echo "$stats" | jq -r '.total' 2>/dev/null | tr -d '[:space:]')
+    local completed=$(echo "$stats" | jq -r '.completed' 2>/dev/null | tr -d '[:space:]')
+    local in_progress=$(echo "$stats" | jq -r '.in_progress' 2>/dev/null | tr -d '[:space:]')
+    local failed=$(echo "$stats" | jq -r '.rejected' 2>/dev/null | tr -d '[:space:]')
+
+    # デフォルト値設定
+    total=${total:-0}
+    completed=${completed:-0}
+    in_progress=${in_progress:-0}
+    failed=${failed:-0}
 
     # 完了率
     local completion_rate=0
@@ -400,8 +409,12 @@ tui_draw_summary() {
 
 # キーヘルプフッターを描画
 tui_draw_footer() {
-    local row=$(($(tui_get_rows) - 2))
-    local cols=$(tui_get_cols)
+    local rows=$(tui_get_rows | tr -d '[:space:]')
+    rows=${rows:-24}
+    local cols=$(tui_get_cols | tr -d '[:space:]')
+    cols=${cols:-80}
+
+    local row=$((rows - 2))
 
     tui_move "$row" 0
 
@@ -435,8 +448,10 @@ tui_draw_footer() {
 
 # タスクボード全体を描画
 tui_draw_taskboard() {
-    local rows=$(tui_get_rows)
-    local cols=$(tui_get_cols)
+    local rows=$(tui_get_rows | tr -d '[:space:]')
+    rows=${rows:-24}
+    local cols=$(tui_get_cols | tr -d '[:space:]')
+    cols=${cols:-80}
 
     # レイアウト計算
     local header_height=3
@@ -476,7 +491,8 @@ tui_draw_taskboard() {
         local col=$((board_col + i * col_width + i * 1))
         local title="${titles[$i]}"
         local tasks="${column_tasks[$i]}"
-        local count=$(echo "$tasks" | jq 'length')
+        local count=$(echo "$tasks" | jq 'length' 2>/dev/null | tr -d '[:space:]')
+        count=${count:-0}
         local focused="false"
         [[ $i -eq $TUI_FOCUSED_COLUMN ]] && focused="true"
 
@@ -506,18 +522,19 @@ tui_draw_selected_task_info() {
     local task_id="$1"
     local tasks_file=$(tui_get_tasks_file)
 
-    local task=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == ($id | tonumber))' "$tasks_file")
+    local task=$(jq -r --arg id "$task_id" '.tasks[] | select(.id == ($id | tonumber))' "$tasks_file" 2>/dev/null)
 
     if [[ -z "$task" ]]; then
         return
     fi
 
-    local description=$(echo "$task" | jq -r '.description')
-    local agent=$(echo "$task" | jq -r '.agent')
-    local priority=$(echo "$task" | jq -r '.priority')
-    local status=$(echo "$task" | jq -r '.status')
+    local description=$(echo "$task" | jq -r '.description' 2>/dev/null)
+    local agent=$(echo "$task" | jq -r '.agent' 2>/dev/null)
+    local priority=$(echo "$task" | jq -r '.priority' 2>/dev/null)
+    local status=$(echo "$task" | jq -r '.status' 2>/dev/null)
 
-    local rows=$(tui_get_rows)
+    local rows=$(tui_get_rows | tr -d '[:space:]')
+    rows=${rows:-24}
     local info_row=$((rows - 6))
 
     tui_move "$info_row" 2

@@ -2,7 +2,22 @@
 # Source this file in your test files: load 'helpers/bats_helper'
 
 # Project root directory
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)}"
+# BATS_TEST_FILENAME points to the test file (e.g., /path/to/tests/acceptance/test.bats)
+# We need to go up 2 levels from tests/acceptance to reach project root
+if [[ -n "${BATS_TEST_FILENAME}" ]]; then
+    # BATS_TEST_FILENAME is like: /path/to/tests/acceptance/test.bats
+    # dirname gives: /path/to/tests/acceptance
+    # We need to go up 2 levels: acceptance -> tests -> project_root
+    TEST_DIR="$(dirname "${BATS_TEST_FILENAME}")"
+    PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${TEST_DIR}/.." && pwd)}"
+else
+    # Fallback when running outside of BATS
+    # BASH_SOURCE[0] is this file: /path/to/tests/helpers/bats_helper.bash
+    # dirname gives: /path/to/tests/helpers
+    # Go up 2 levels to reach project root
+    HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${HELPER_DIR}/../.." && pwd)}"
+fi
 
 # Claude directory
 CLAUDE_DIR="$PROJECT_ROOT/.claude"
@@ -157,25 +172,89 @@ assert_task_status() {
 }
 
 # Assert agent is running
+# Arguments: agent_name [max_wait_seconds]
 assert_agent_running() {
     local agent="$1"
-    local pid_file="$PIDS_DIR/$agent.json"
+    local max_wait="${2:-10}"
+    local pid_file="$PIDS_DIR/${agent}.json"
+    local pid_text_file="$PIDS_DIR/${agent}.pid"
+    local elapsed=0
 
-    [[ -f "$pid_file" ]]
-    local pid=$(jq -r '.pid' "$pid_file")
-    kill -0 "$pid" 2>/dev/null
+    # Wait for agent to start (with timeout)
+    while [[ $elapsed -lt $max_wait ]]; do
+        # Check for either .json or .pid file (orchestrator writes .pid, tests may create .json)
+        local pid=""
+        local found_file=""
+
+        if [[ -f "$pid_file" ]]; then
+            pid=$(jq -r '.pid' "$pid_file" 2>/dev/null || echo "")
+            found_file="(json)"
+        elif [[ -f "$pid_text_file" ]]; then
+            pid=$(cat "$pid_text_file" 2>/dev/null || echo "")
+            found_file="(pid)"
+        fi
+
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+
+        # If neither file type exists, definitely wait
+        if [[ -z "$found_file" ]]; then
+            sleep 1
+        fi
+        ((elapsed++))
+    done
+
+    # Final check after timeout (check both file types)
+    local pid=""
+    if [[ -f "$pid_file" ]]; then
+        pid=$(jq -r '.pid' "$pid_file" 2>/dev/null || echo "")
+    elif [[ -f "$pid_text_file" ]]; then
+        pid=$(cat "$pid_text_file" 2>/dev/null || echo "")
+    fi
+
+    if [[ -n "$pid" ]]; then
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        else
+            echo "Agent $agent PID file exists but process not running (PID: $pid)"
+            return 1
+        fi
+    fi
+
+    echo "Agent $agent not running after ${max_wait}s (neither .json nor .pid file found)"
+    return 1
 }
 
 # Assert agent is not running
 assert_agent_not_running() {
     local agent="$1"
-    local pid_file="$PIDS_DIR/$agent.json"
+    local pid_file="$PIDS_DIR/${agent}.json"
+    local pid_text_file="$PIDS_DIR/${agent}.pid"
+
+    # Check both .json and .pid files
+    local json_running=false
+    local pid_running=false
 
     if [[ -f "$pid_file" ]]; then
-        local pid=$(jq -r '.pid' "$pid_file")
-        if [[ -n "$pid" ]]; then
-            ! kill -0 "$pid" 2>/dev/null
+        local pid=$(jq -r '.pid' "$pid_file" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            json_running=true
         fi
+    fi
+
+    if [[ -f "$pid_text_file" ]]; then
+        local pid=$(cat "$pid_text_file" 2>/dev/null || echo "")
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            pid_running=true
+        fi
+    fi
+
+    # Agent is considered running if EITHER file exists with valid PID
+    if [[ "$json_running" == "true" ]] || [[ "$pid_running" == "true" ]]; then
+        return 1
+    else
+        return 0
     fi
 }
 
@@ -186,8 +265,8 @@ create_fixture_task() {
     local priority="${3:-normal}"
     local status="${4:-pending}"
 
-    local task_id=$(jq '.next_id' "$TASKS_FILE")
-    local next_id=$((task_id + 1))
+    local last_id=$(jq '.last_id' "$TASKS_FILE")
+    local task_id=$((last_id + 1))
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
     # Add task to tasks array
@@ -195,17 +274,18 @@ create_fixture_task() {
        --arg agent "$agent" \
        --arg priority "$priority" \
        --arg status "$status" \
-       --arg id "$task_id" \
+       --argjson id "$task_id" \
        --arg created "$timestamp" \
        '.tasks += [{
-         id: ($id | tonumber),
+         id: $id,
          description: $desc,
          agent: $agent,
          priority: $priority,
          status: $status,
          created_at: $created,
+         updated_at: $created,
          dependencies: []
-       }] | .next_id = ($next_id | tonumber)' \
+       }] | .last_id = $id' \
        "$TASKS_FILE" > "$TASKS_FILE.tmp"
 
     mv "$TASKS_FILE.tmp" "$TASKS_FILE"
@@ -270,11 +350,10 @@ create_fixture_approval() {
        --arg op "$operation_type" \
        --arg details "$details_json" \
        --arg status "$status" \
-       --arg id "$approval_id" \
-       --arg next_id "$next_id" \
+       --argjson id "$approval_id" \
        --arg created "$timestamp" \
        '.approvals += [{
-         id: ($id | tonumber),
+         id: $id,
          task_id: $tid,
          operation_type: $op,
          details: (if $details == "" then {} else ($details | fromjson) end),
@@ -282,7 +361,7 @@ create_fixture_approval() {
          requested_by: "test-user",
          status: $status,
          response: null
-       }] | .last_id = ($next_id | tonumber)' \
+       }] | .last_id = $id' \
        "$APPROVALS_FILE" > "$APPROVALS_FILE.tmp"
 
     mv "$APPROVALS_FILE.tmp" "$APPROVALS_FILE"

@@ -98,7 +98,7 @@ _tui_read_escape_sequence() {
 # キー入力を取得（メイン関数）
 tui_get_key() {
     local char
-    char=$(_tui_read_char 0)
+    char=$(_tui_read_char 1)
 
     if [[ -z "$char" ]]; then
         # タイムアウト（auto-update用）

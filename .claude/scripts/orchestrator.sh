@@ -945,7 +945,8 @@ launch_agents_background() {
     local timeout=""
 
     # タイムアウトが数値のみの場合は、タイムアウトとして扱う
-    if [[ "$last_arg" =~ ^[0-9]+$ ]]; then
+    # ただし、引数が1つの場合はタスクIDとみなす（タイムアウトのみ指定して起動することはないため）
+    if [[ "$last_arg" =~ ^[0-9]+$ ]] && [[ $# -gt 1 ]]; then
         timeout="$last_arg"
         # タイムアウトを除いたタスクIDを取得
         set -- "${@:1:$#-1}"
@@ -1591,30 +1592,38 @@ add_task() {
     local task_id=$(generate_task_id)
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # 新規タスク作成（拡張スキーマ対応）
-    local new_task=$(cat <<EOF
-{
-  "id": $task_id,
-  "description": "$task_desc",
-  "agent": "$agent",
-  "status": "pending",
-  "priority": "$priority",
-  "dependencies": $dependencies,
-  "contract": $contract,
-  "deliverables": $deliverables,
-  "verification_steps": $verification_steps,
-  "definition_of_done": $definition_of_done,
-  "created_at": "$timestamp",
-  "updated_at": "$timestamp",
-  "started_at": null,
-  "completed_at": null,
-  "notes": [],
-  "review_comments": null,
-  "rejection_reason": null,
-  "related_adr": []
-}
-EOF
-)
+    # 新規タスク作成（jqを使用して安全にJSONを構築）
+    local new_task=$(jq -n \
+        --argjson id "$task_id" \
+        --arg desc "$task_desc" \
+        --arg agent "$agent" \
+        --arg priority "$priority" \
+        --argjson deps "$dependencies" \
+        --argjson contract "$contract" \
+        --argjson deliv "$deliverables" \
+        --argjson vsteps "$verification_steps" \
+        --argjson dod "$definition_of_done" \
+        --arg ts "$timestamp" \
+        '{
+          id: $id,
+          description: $desc,
+          agent: $agent,
+          status: "pending",
+          priority: $priority,
+          dependencies: $deps,
+          contract: $contract,
+          deliverables: $deliv,
+          verification_steps: $vsteps,
+          definition_of_done: $dod,
+          created_at: $ts,
+          updated_at: $ts,
+          started_at: null,
+          completed_at: null,
+          notes: [],
+          review_comments: null,
+          rejection_reason: null,
+          related_adr: []
+        }')
 
     # ログ記録
     orch_log "INFO" "タスク追加: [#$task_id] $task_desc (担当: $agent, 優先度: $priority)"
@@ -1658,16 +1667,29 @@ EOF
         echo ""
         launch_agents_background "$task_id"
     fi
+
+    return 0
 }
 
-# タスク開始
 start_task() {
     local task_id=$1
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # タスク情報をログ
-    local task_desc=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .description' "$TASKS_FILE")
-    local task_agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE")
+    # タスク情報を取得
+    local task=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE")
+    if [[ -z "$task" || "$task" == "null" ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] が見つかりませんでした${NC}\n"
+        return 1
+    fi
+
+    local current_status=$(echo "$task" | jq -r '.status')
+    if [[ "$current_status" != "pending" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は既に開始されているか、完了しています (状態: $current_status)${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(echo "$task" | jq -r '.description')
+    local task_agent=$(echo "$task" | jq -r '.agent')
 
     orch_log "INFO" "タスク開始: [#$task_id] $task_desc (担当: $task_agent)"
 
@@ -1683,15 +1705,26 @@ start_task() {
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] を開始しました${NC}\n"
 }
 
-# タスク完了
 complete_task() {
     local task_id=$1
     local notes="${2:-}"
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # タスク情報をログ
-    local task_desc=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .description' "$TASKS_FILE")
-    local task_agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE")
+    # タスク情報を取得
+    local task=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE")
+    if [[ -z "$task" || "$task" == "null" ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] が見つかりませんでした${NC}\n"
+        return 1
+    fi
+
+    local current_status=$(echo "$task" | jq -r '.status')
+    if [[ "$current_status" != "in_progress" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は実行中ではありません (状態: $current_status)${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(echo "$task" | jq -r '.description')
+    local task_agent=$(echo "$task" | jq -r '.agent')
 
     orch_log "INFO" "タスク完了: [#$task_id] $task_desc (担当: $task_agent)"
     [[ -n "$notes" ]] && orch_log "INFO" "  メモ: $notes"
@@ -2327,9 +2360,7 @@ ${YELLOW}TUI (Terminal UI):${NC}
     ${GREEN}dashboard [--watch|--loop]${NC}  メインダッシュボードを表示
                                        --watch: 5秒ごと自動更新
                                        --loop: Enterで更新
-    ${GREEN}board [--watch|--loop]${NC}      タスクボード（カンバン）を表示
-                                       --watch: 5秒ごと自動更新
-                                       --loop: Enterで更新
+    ${GREEN}board${NC}                       タスクボード（カンバン）を表示（インタラクティブ）
     ${GREEN}logs-tui [-f] [-n N] [-e]${NC}  TUIライブログビューア
                                        -f: フォローモード
                                        -n N: 表示行数指定
@@ -2479,7 +2510,7 @@ worktree_create() {
         printf "%b" "${GREEN}✓ Worktree を作成しました: ${worktree_path}${NC}\n"
         echo ""
         printf "%b" "${CYAN}エージェントを起動するには:${NC}\n"
-        printf "%b" "  ${GREEN}cd ${worktree_path} && ../.claude/agent.sh ${agent}${NC}\n"
+        printf "%b" "  ${GREEN}cd ${worktree_path} && ../../agent.sh ${agent}${NC}\n"
         echo ""
         printf "%b" "${CYAN}または、Worktreeモードで起動:${NC}\n"
         printf "%b" "  ${GREEN}USE_WORKTREE=true orch agent ${agent}${NC}\n"
@@ -2569,12 +2600,12 @@ worktree_launch_agent() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         osascript <<EOF
 tell application "Terminal"
-    do script "cd '$worktree_path' && '../.claude/agent.sh' $agent"
+    do script "cd '$worktree_path' && '../../agent.sh' $agent"
 end tell
 EOF
     else
         printf "%b" "${CYAN}手動で起動:${NC}\n"
-        echo "  cd ${worktree_path} && ../.claude/agent.sh ${agent}"
+        echo "  cd ${worktree_path} && ../../agent.sh ${agent}"
     fi
 }
 
@@ -3600,27 +3631,28 @@ case "${1:-}" in
         ;;
     dashboard)
         # TUI Dashboard - メインダッシュボードを表示
-        _tui_script="$SCRIPT_DIR/tui-dashboard.sh"
-        _mode="${2:-}"
-
+        # ユーザー要望により dashboard.sh を使用
+        _tui_script="$SCRIPT_DIR/dashboard.sh"
+        
         if [[ ! -f "$_tui_script" ]]; then
-            printf "%b" "${RED}エラー: TUI Dashboard スクリプトが見つかりません${NC}\n"
+            printf "%b" "${RED}エラー: Dashboard スクリプトが見つかりません: $_tui_script${NC}\n"
             exit 1
         fi
 
-        bash "$_tui_script" "$_mode"
+        # 引数をそのまま渡す (例: --watch)
+        shift # "dashboard" を削除
+        bash "$_tui_script" "$@"
         ;;
     board|taskboard)
-        # TUI Task Board - タスクボード（カンバン）を表示
-        _tui_script="$SCRIPT_DIR/tui-taskboard.sh"
-        _mode="${2:-}"
-
-        if [[ ! -f "$_tui_script" ]]; then
-            printf "%b" "${RED}エラー: TUI Task Board スクリプトが見つかりません${NC}\n"
+        # TUI Task Board - インタラクティブTUIと同じ（Kanban）を使用
+        # 旧 tui-taskboard.sh は日本語表示に問題があるため廃止
+        _tui_script="$SCRIPT_DIR/tui-interactive.sh"
+        if [[ -f "$_tui_script" ]]; then
+            bash "$_tui_script" "$@"
+        else
+            printf "%b" "${RED}エラー: tui-interactive.sh が見つかりません。${NC}\n"
             exit 1
         fi
-
-        bash "$_tui_script" "$_mode"
         ;;
     logs-tui)
         # TUI Logs - ライブログビューア
@@ -3635,11 +3667,12 @@ case "${1:-}" in
         bash "$_tui_script" "$@"
         ;;
     interactive|i)
-        # インタラクティブTUIを起動
-        if [[ -f "$SCRIPT_DIR/tui-interactive.sh" ]]; then
-            bash "$SCRIPT_DIR/tui-interactive.sh" "$@"
+        # インタラクティブTUIを起動（Kanban）
+        _tui_script="$SCRIPT_DIR/tui-interactive.sh"
+        if [[ -f "$_tui_script" ]]; then
+            bash "$_tui_script" "$@"
         else
-            printf "%b" "${RED}エラー: tui-interactive.shが見つかりません${NC}\n"
+            printf "%b" "${RED}エラー: tui-interactive.sh が見つかりません。${NC}\n"
             exit 1
         fi
         ;;

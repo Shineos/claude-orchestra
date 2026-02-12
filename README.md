@@ -1,555 +1,174 @@
-# Claude Code マルチエージェントシステム
+# Claude Orchestra 🎺
 
-> [!IMPORTANT] 
-> **動作環境について**
-> 本システムは **macOS** および **Linux** 環境専用です。
-> Windows 環境での動作は保証しておりません。
+<div align="center">
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-macOS%20|%20Linux-lightgrey.svg)
+![Claude](https://img.shields.io/badge/AI-Claude%20Code-purple.svg)
 
-Claude Code を活用したマルチエージェントシステム。Orchestrator（調整）と各専門エージェント（Frontend、Backend、Tests、Docs）が連携して効率的な開発を実現します。
+**Claude Code を活用した自律型マルチエージェント開発基盤**
 
-![Architecture](docs/images/architecture.png)
+[特徴](#特徴) • [インストール](#インストール) • [使い方](#使い方) • [アーキテクチャ](#アーキテクチャ)
 
-## 前提条件
+</div>
 
-本システムを使用する前に、以下のツールがインストールされている必要があります。
+---
 
-### 必須
+## 🚀 Quick Start
 
-- **Claude Code CLI**: Anthropic の公式 Claude CLI ツール
-  ```bash
-  # インストール確認
-  claude --version
-  ```
-  Claude Code がインストールされていない場合、AIタスク分解機能は動作しません。
-
-- **jq**: JSON処理コマンドラインツール
-  ```bash
-  # macOS
-  brew install jq
-
-  # Ubuntu/Debian
-  sudo apt install jq
-
-  # インストール確認
-  jq --version
-  ```
-
-- **bash**: シェルスクリプト実行環境
-  ```bash
-  # バージョン確認
-  bash --version
-  ```
-  macOS のデフォルト `sh` では動作しません。必ず `bash` を使用してください。
-
-### 推奨
-
-- **tmux**: 複数エージェントの並列実行・監視を容易にするターミナルマルチプレクサ
-  ```bash
-  # macOS
-  brew install tmux
-
-  # Ubuntu/Debian
-  sudo apt install tmux
-  ```
-
-## 特徴
-
-- 🚀 **コピーするだけ** - `.claude-template` をプロジェクトにコピーするだけ
-- 🤖 **AIタスク分解** - Claude AI がタスクを自動分解し、適切なエージェントを割り当て
-- ✂️ **ユーザー確認フロー** - 分解結果を確認して承認・修正可能
-- 📺 **TUI ダッシュボード** - ターミナルベースの美しいダッシュボードとタスクボード
-- 📊 **リアルタイムログ監視** - エージェントのログをリアルタイムで監視
-- 🔄 **並列実行対応** - 複数エージェントを同時稼働
-
-詳細な仕様については [docs/specification.md](docs/specification.md) を参照してください。
-
-![Sample](docs/images/top.png)
-*使用例*
-
-## インストール
-
-### ワンライナーでインストール（推奨）
+**たった1行で、あなたのプロジェクトにAI開発チームを召喚します。**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash
 ```
 
-インストール先を指定する場合:
+<br>
+
+![Dashboard Demo](docs/images/dashboard-demo.png)
+
+## 📖 概要
+
+**Claude Orchestra** は、Anthropic の公式 CLI ツール `Claude Code` を拡張し、複数の専門エージェントが協調して開発を行うためのオーケストレーションシステムです。
+
+単なるチャットボットではありません。**要件定義から実装、テスト、ドキュメント作成まで**、AIエージェントたちが自律的にタスクを分担・実行し、あなたの開発を強力にサポートします。
+
+### なぜ Claude Orchestra なのか？
+
+- **⚡️ 並列開発**: Frontend, Backend, Tests, Docs エージェントが同時に動き、開発時間を短縮します。
+- **🧠 インテリジェントなタスク分解**: 複雑な要件をAIが分析し、最適なサブタスクに自動分解します。
+- **🖥 美しいTUI**: ターミナルで完結する、直感的で美しいダッシュボードを提供します。
+
+## ✨ 特徴
+
+- **🤖 自律型エージェントチーム**
+    - **Planner**: 全体の計画立案とタスク管理
+    - **Frontend**: UI/UXの実装 (React, Vue, Tailwind...)
+    - **Backend**: API, DB設計, サーバーサイドロジック
+    - **Tests**: 単体テスト, 結合テストの作成と実行
+    - **Docs**: README, 仕様書の自動更新
+
+- **📊 TUI ダッシュボード**
+    - リアルタイムな進捗可視化
+    - カンバンボード形式のタスク管理
+    - キーボード操作に最適化 (Vimライクなバインディング)
+
+- **🔄 シームレスなワークフロー**
+    - `orch add "機能追加"` だけで、AIがプランを作成・提案
+    - 承認するだけでエージェントが一斉に稼働開始
+    - ログはリアルタイムでストリーミング確認可能
+
+## 📦 インストール
+
+### 推奨環境
+- macOS または Linux
+- `bash` (4.0以上推奨)
+- `jq`
+- `claude` (Claude Code CLI)
+
+### ワンライナー (推奨)
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash -s -- /path/to/your-project
+# カレントディレクトリのプロジェクトにインストール
+curl -fsSL https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash
 ```
 
-特定のバージョンをインストールする場合:
+### オプション
+
 ```bash
+# インストール先を指定
+curl -fsSL https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash -s -- /path/to/project
+
+# 特定バージョンを指定
 curl -fsSL https://raw.githubusercontent.com/shineos/claude-orchestra/main/install-remote.sh | bash -s -- -v v1.0.0
 ```
 
-### GitHub Releases からインストール
+### 3. 便利に使うための設定 (推奨)
 
-1. [Releases](https://github.com/shineos/claude-orchestra/releases) ページから最新の `claude-orchestra.tar.gz` をダウンロード
-2. 解凍してインストーラーを実行:
-
-```bash
-tar -xzf claude-orchestra.tar.gz
-cd claude-orchestra
-./install.sh /path/to/your-project
-```
-
-### ソースコードからインストール
+プロジェクトのルートディレクトリで `orch` コマンドを使えるようにエイリアスを設定します。
 
 ```bash
-# インストーラーを実行
-cd /path/to/claude-orchestra
-./install.sh /path/to/your-project
-
-# ターゲットプロジェクトに移動
-cd /path/to/your-project
+# .zshrc または .bashrc に追加
+alias orch='bash .claude/orchestra.sh'
+alias agent='bash .claude/agent.sh' # 個別にエージェントを動かす場合
 ```
 
-### ⚠️ bash で実行してください
 
-macOS の `sh` では動作しません。必ず `bash` を使用してください。
+## 🏗 アーキテクチャ
+
+```mermaid
+graph TD
+    User[👤 User] -->|1. orch add| Orchestrator[🎻 Orchestrator]
+    Orchestrator -->|2. Analyze & Plan| Planner[🧠 Planner Agent]
+    Planner -->|3. Decompose| Tasks[📋 Tasks JSON]
+    
+    subgraph "Agent Team"
+        Frontend[🎨 Frontend]
+        Backend[⚙️ Backend]
+        Tests[test Tests]
+        Docs[📚 Docs]
+    end
+    
+    Orchestrator -->|4. Dispatch| Frontend
+    Orchestrator -->|4. Dispatch| Backend
+    Orchestrator -->|4. Dispatch| Tests
+    Orchestrator -->|4. Dispatch| Docs
+    
+    Frontend -->|5. Update| Dashboard[📺 TUI Dashboard]
+    Backend -->|5. Update| Dashboard
+    Tests -->|5. Update| Dashboard
+```
+
+## 🎮 使い方
+
+### 1. タスクの追加 (AIオートモード)
+
+やりたいことを自然言語で伝えるだけです。
 
 ```bash
-# ✗ 正しくない
-sh .claude/scripts/orchestrator.sh status
-
-# ✓ 正しい
-bash .claude/scripts/orchestrator.sh status
+orch add "ユーザーログイン機能を実装して"
 ```
 
-### エイリアス設定（推奨）
+AIがタスクを分析し、提案を作成します。`Y` で承認すると、各エージェントが作業を開始します。
 
-`.zshrc` または `.bashrc` に追加：
+### 2. 進捗の確認
+
+ダッシュボードで全エージェントの動きを把握できます。
 
 ```bash
-# Orchestrator コマンド
-alias orch="bash ./.claude/scripts/orchestrator.sh"
-
-# Agent コマンド
-alias agent="bash ./.claude/agent.sh"
-
-# TUI ダッシュボード（便利なエイリアス）
-alias orch-dash="bash ./.claude/scripts/orchestrator.sh dashboard"
-alias orch-board="bash ./.claude/scripts/orchestrator.sh board"
-
-# ログ監視
-alias orch-logs="bash ./.claude/scripts/orchestrator.sh logs"
-alias orch-follow="bash ./.claude/scripts/orchestrator.sh logs -f"
-
-# AI を無効化してルールベースのみを使用する場合
-# export USE_AI=false
+orch dashboard --watch
 ```
 
----
+### 3. エージェントのログ確認
 
-## コマンド一覧
-
-### タスク管理
-
-| コマンド | 説明 |
-|---------|------|
-| `orch add "タスク説明"` | タスク追加（自動振り分け） |
-| `orch add "タスク" <agent> <priority> [deps]` | タスク追加（手動指定） |
-| `orch load <json_file>` | JSONファイルからタスクを読み込み |
-| `orch status` | タスク状況一覧 |
-| `orch start <id>` | タスク開始 |
-| `orch complete <id>` | タスク完了 |
-| `orch fail <id> "理由"` | タスク失敗 |
-| `orch reset <id>` | タスクをpendingにリセット |
-| `orch next` | 次に実行可能なタスク表示 |
-
-### エージェント操作
-
-| コマンド | 説明 |
-|---------|------|
-| `agent <name>` | エージェント起動 |
-| `orch launch` | 未着手タスクのエージェントを一括起動 |
-| `orch agents` | エージェント別ステータス表示 |
-| `orch monitor` | リアルタイムモニタリング（5秒更新） |
-| `orch monitor-agents` | エージェント別リアルタイム監視 |
-| `orch list` / `orch ps` | 実行中のエージェント一覧 |
-| `orch stop <agent\|all>` | エージェントを停止 |
-| `orch restart <agent\|all>` | エージェントを再起動 |
-| `orch remove <agent>` | エージェントを停止してタスク削除 |
-
-### 自動監視モード
-
-| コマンド | 説明 |
-|---------|------|
-| `orch watch <agent>` | エージェント自動監視（タスク追加・待機・開始・完了をループ） |
-| `orch watch <agent> worktree` | Worktree モードで自動監視 |
-| `orch wait <id>` | 依存タスク完了まで待機 |
-| `orch auto <agent>` | 次タスクを自動開始 |
-
-### Git Worktree
-
-| コマンド | 説明 |
-|---------|------|
-| `orch worktree` / `orch worktree list` | Worktree 一覧 |
-| `orch worktree create <name>` | Worktree 作成 |
-| `orch worktree launch <name>` | Worktree でエージェント起動 |
-| `orch worktree remove <name>` | Worktree 削除 |
-| `orch worktree cleanup` | すべての Worktree をクリーンアップ |
-
----
-
-## 使用例
-
-### AI タスク分解と確認フロー
+特定のエージェントが何をしているか詳しく見たい場合：
 
 ```bash
-# タスクを追加（AIが自動分解）
-orch add "ユーザー認証機能の実装"
-```
-
-**実行例:**
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  タスク自動振り分け (AI Mode: true)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-元のタスク: ユーザー認証機能の実装
-
-AIでタスクを分析中...
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  タスク分解プラン
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-元のタスク:
-  ユーザー認証機能の実装
-
-提案されたサブタスク (4個):
-
-[1] ログインフォームのUI実装
-    担当: Frontend
-    理由: ユーザーインターフェースの実装が必要です
-
-[2] 認証APIの実装（POST /api/auth/login）
-    担当: Backend
-    理由: サーバーサイドの認証ロジックが必要です
-
-[3] セッション管理（JWT/Cookie）
-    担当: Backend
-    理由: 認証状態の管理が必要です
-
-[4] 認証機能のテスト作成
-    担当: Tests
-    理由: 品質保証のためテストが必要です
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-このプランで進めますか？
-
-  Y - このプランを承認
-  N - 拒否して再分解
-  E - 手動で編集
-  Q - キャンセル
-
-選択: Y
-
-✓ 4個のタスクを作成しました
-```
-
-**選択肢の説明:**
-
-| 選択肢 | 説明 |
-|-------|------|
-| **Y** | 提案されたプランを承認してタスクを作成 |
-| **N** | プランを拒否して再分解（フィードバックを入力可能、最大3回） |
-| **E** | JSONファイルを出力して手動編集モードへ |
-| **Q** | キャンセルして何もしない |
-
-### 編集モード（Eオプション）
-
-「E」を選択すると、分解結果がJSONファイルとして保存され、エディタで直接編集できます。
-
-**実行例:**
-
-```
-選択: E
-
-".claude/decomposition.json"ファイルを手動で編集してください。
-編集後、`orch load .claude/decomposition.json` コマンド実行してください
-```
-
-**手順:**
-
-1. 「E」を選択すると `.claude/decomposition.json` が保存される
-2. お好みのエディタでJSONファイルを編集
-3. 編集完了後に以下のコマンドでタスクを作成:
-
-```bash
-# JSONファイルを指定してタスクを作成
-orch load .claude/decomposition.json
-```
-
-**編集可能な項目:**
-
-- `description`: サブタスクの説明
-- `agent`: 担当エージェント（frontend/backend/tests/docs）
-- `dependencies`: 依存するサブタスクのインデックス配列
-- `rationale`: 担当理由
-
-### 基本的なワークフロー
-
-```bash
-# タスクを追加（自動分解・振り分け）
-orch add "ユーザー認証機能の実装"
-
-# エージェントは自動でwatchモードとして起動し、タスクを連続実行します
-# 別途起動する必要はありません
-
-# タスク状況を確認
-orch status
-
-# 実行中のエージェントを確認
-orch list
-```
-
-### 依存関係を含むタスク
-
-```bash
-# タスク1: データベース設計
-orch add "データベース設計" backend high
-
-# タスク2: API実装（タスク1に依存）
-orch add "ユーザーAPI実装" backend normal [1]
-
-# タスク3: テスト（タスク2に依存）
-orch add "APIテスト作成" tests normal [2]
-
-# 依存タスクを待機して実行
-orch wait 3
-```
-
-### ログ確認
-
-| コマンド | 説明 |
-|---------|------|
-| `orch logs` | エージェントのログを表示（最新20件） |
-| `orch logs -f` | ログをリアルタイム監視（フォローモード） |
-| `orch logs -f <agent>` | エージェント指定でリアルタイム監視 |
-| `orch logs -n <N>` | 表示するログ行数を指定 |
-| `orch logs -e` | エラーログのみ表示 |
-| `orch log-tail` | ログをリアルタイム監視（レガシー） |
-
-```bash
-# 今日のログを確認
-orch logs
-
-# ログをリアルタイムで監視
+# 全エージェントのログを流し見
 orch logs -f
 
-# Frontendエージェントのログを監視
-orch logs -f frontend
-
-# エラーのみ監視
-orch logs -f -e
+# 特定のエージェントのみ
+orch logs -f backend
 ```
 
-### TUI ダッシュボード
+## 🛠 コマンドリファレンス
 
 | コマンド | 説明 |
-|---------|------|
-| `orch dashboard` / `orch ui` | メインダッシュボードを表示 |
-| `orch board` / `orch taskboard` | タスクボード（カンバン形式）を表示 |
-| `orch dashboard --watch` | ダッシュボードを自動更新（5秒ごと） |
-| `orch board --watch` | タスクボードを自動更新（5秒ごと） |
+|---|---|
+| `orch add "内容"` | AIによるタスク分解と追加 |
+| `orch status` | タスク一覧とステータス確認 |
+| `orch dashboard` | TUIダッシュボード起動 |
+| `orch logs` | エージェントのログ確認 |
+| `orch stop all` | 全エージェントの停止 |
+| `orch clean` | 完了タスクのアーカイブ（整理） |
 
-```bash
-# ダッシュボードを表示
-orch dashboard
-
-# タスクボードを表示
-orch board
-
-# ウォッチモードで監視
-orch dashboard --watch
-
-# ループモード（Enterで更新）
-orch dashboard --loop
-```
-
-**TUI ダッシュボードの機能:**
-
-- 📊 プロジェクト概要（全タスク数、完了数、進行中、保留中）
-- 🤖 エージェント状態（Active/Idle、現在実行中のタスク）
-- 📈 タスク統計（今日完了、失敗、レビュー待、平均完了時間）
-- 🎨 色分け表示（ステータス、優先度、エージェント別）
-
-### 自動監視モード（デフォルト）
-
-**注**: タスク追加時にエージェントは自動でwatchモードとして起動します。手動での起動は通常不要です。
-
-```bash
-# タスクを追加すると、エージェントが自動でwatchモードとして起動
-orch add "認証機能実装"
-# -> エージェントが自動起動し、タスクを連続実行
-
-# 手動でwatchモードを開始する場合（オプション）
-orch watch frontend  # ターミナル1
-orch watch backend   # ターミナル2
-```
-
-### Git Worktree モード
- 
-```bash
-# Worktree を作成
-orch worktree create frontend
-orch worktree create backend
-
-# Worktree で起動
-orch worktree launch frontend  # ターミナル1
-orch worktree launch backend   # ターミナル2
-
-# 完了後にコミット・削除
-cd .claude/worktrees/frontend
-git add . && git commit -m "Implement login UI"
-
-cd ../../..
-orch worktree remove frontend
-```
-
-### tmux での並列監視
-
-```bash
-# tmux セッション作成
-tmux new-session -d -s agents
-
-# 各エージェント用ウィンドウを作成
-tmux new-window -t agents -n orchestrator
-tmux new-window -t agents -n frontend
-tmux new-window -t agents -n backend
-
-# セッションにアタッチ
-tmux attach -t agents
-
-# 各ウィンドウで実行
-# Ctrl+b+0: orch monitor-agents
-# Ctrl+b+1: orch watch frontend
-# Ctrl+b+2: orch watch backend
-```
+詳細なドキュメントは [docs/specification.md](docs/specification.md) をご覧ください。
 
 ---
 
-## エージェントの役割
+<div align="center">
 
-| エージェント | 役割 | 判定キーワード例 |
-|------------|------|-----------------|
-| **Orchestrator** | 調整・統括 | - |
-| **Frontend** | UI/UX実装 | UI, 画面, コンポーネント, スタイル, フォーム, css, react... |
-| **Backend** | API/DB/認証 | API, サーバー, データベース, 認証, ログイン, モデル... |
-| **Tests** | テスト | テスト, スペック, カバレッジ, 単体テスト, 結合テスト, e2e... |
-| **Docs** | ドキュメント | ドキュメント, README, 仕様書, マニュアル, ガイド... |
+**Enjoy Orchestration! 🎻**
 
-### 自動分解パターン
+[Report Bug](https://github.com/shineos/claude-orchestra/issues) • [Request Feature](https://github.com/shineos/claude-orchestra/issues)
 
-特定の機能キーワードを含む場合、自動的に複数タスクに分解されます：
-
-| 元のタスク | 分解されるサブタスク |
-|-----------|-------------------|
-| `ユーザー認証機能` | 1. ログインフォームUI<br>2. 認証API実装<br>3. セッション管理<br>4. 単体テスト<br>5. 結合テスト<br>6. APIドキュメント |
-| `ユーザー登録機能` | 1. 登録フォームUI<br>2. 登録API実装<br>3. メール確認<br>4. テスト作成<br>5. ドキュメント作成 |
-
----
-
-## 設定
-
-### タイムアウト設定
-
-エージェントがタスクを実行する最大時間を設定できます。デフォルトは10分（600秒）です。
-
-```bash
-# restartコマンドでタイムアウトを指定
-orch restart backend 1200     # 20分（1200秒）
-orch restart frontend 900     # 15分（900秒）
-orch restart all 1800         # すべてのエージェントを30分で再起動
-
-# 環境変数で設定（秒単位）
-export CLAUDE_TIMEOUT=300  # 5分
-
-# 実行時に指定
-CLAUDE_TIMEOUT=600 agent backend
-```
-
-### ログ設定
-
-```bash
-# ログディレクトリ
-.claude/logs/
-
-# 今日のログを確認
-orch logs
-
-# ログをリアルタイム監視
-orch log-tail
-```
-
----
-
-## トラブルシューティング
-
-### エージェントが応答しない
-
-エージェントが長時間実行されている場合は、タイムアウト設定を確認してください。
-
-```bash
-# 実行中のプロセスを確認
-ps aux | grep agent.sh
-
-# 停止するには
-kill -9 <PID>
-```
-
-### タスクが実行されない
-
-`orch agents` で「依存タスク完了待ち」と表示される場合、依存タスクが完了するのを待つ必要があります。
-
-```bash
-# 依存関係を確認
-orch next
-
-# 依存タスクのステータス確認
-orch status
-```
-
-### タスクをリセットする
-
-タスクが「実行中」や「失敗」のまま停止した場合は、手動でリセットできます。
-
-```bash
-# タスクをpendingに戻す
-orch reset <ID>
-```
-
-また、`orch restart all` を実行すると、`failed` 状態のタスクも自動的に `pending` に戻されます。
-
----
-
-## 優先度
-
-| 優先度 | 説明 |
-|-------|------|
-| `critical` | 最優先 (!!!) |
-| `high` | 高優先 (!!) |
-| `normal` | 通常 |
-| `low` | 低優先 (-) |
-
----
-
-## .gitignore 設定
-
-```gitignore
-# Claude Code マルチエージェントシステム
-.claude/tasks.json
-.claude/worktrees/
-```
-
----
-
-## ライセンス
-
-MIT License - [LICENSE](./LICENSE) を参照してください
+</div>

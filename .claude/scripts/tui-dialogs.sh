@@ -355,8 +355,8 @@ tui_task_detail_dialog() {
 
     # アクションボタン
     local button_row=$((dialog_row + height - 2))
-    tui_move "$button_row" $((dialog_col + width / 2 - 20))
-    printf "[s:Start] [c:Complete] [f:Fail] [r:Reset] [Esc:Close]"
+    tui_move "$button_row" $((dialog_col + width / 2 - 24))
+    printf "[s:Start] [c:Complete] [f:Fail] [e:Edit] [r:Reset] [Esc:Close]"
 
     # 入力待ちループ
     while true; do
@@ -366,12 +366,14 @@ tui_task_detail_dialog() {
             s)
                 # Start task
                 tui_close_dialog
-                return "start"
+                echo "start"
+                return 0
                 ;;
             c)
                 # Complete task
                 tui_close_dialog
-                return "complete"
+                echo "complete"
+                return 0
                 ;;
             f)
                 # Fail task
@@ -379,17 +381,73 @@ tui_task_detail_dialog() {
                 if [[ $? -eq 0 ]]; then
                     tui_close_dialog
                     echo "fail:$reason"
-                    return "fail"
+                    return 0
                 fi
+                ;;
+            e)
+                # Edit task properties
+                local edit_opts="Description Agent Priority Notes"
+                local target=$(tui_selection_dialog "Edit Property" "$edit_opts" 0 40 10)
+                
+                if [[ $? -eq 0 && -n "$target" ]]; then
+                    local new_val=""
+                    local field=""
+                    case "$target" in
+                        "Description")
+                            new_val=$(tui_input_dialog "Edit Description" "Value:" "$description" 50 8)
+                            field="description"
+                            ;;
+                        "Agent")
+                            local agents="frontend backend tests docs planner architect coder reviewer tester"
+                            new_val=$(tui_selection_dialog "Select Agent" "$agents" 0 40 12)
+                            field="agent"
+                            ;;
+                        "Priority")
+                            local priorities="critical high normal low"
+                            new_val=$(tui_selection_dialog "Select Priority" "$priorities" 2 40 10)
+                            field="priority"
+                            ;;
+                        "Notes")
+                            new_val=$(tui_input_dialog "Add Note" "Note:" "" 50 8)
+                            if [[ $? -eq 0 && -n "$new_val" ]]; then
+                                # ノートは配列に追加するため特殊扱い
+                                # 簡易的に orchestrator add-note コマンドを呼ぶか、呼び出し元に任せる
+                                # ここでは呼び出し元に返す形にする
+                                tui_close_dialog
+                                echo "add-note:$new_val"
+                                return 0
+                            fi
+                            continue
+                            ;;
+                    esac
+                    
+                    if [[ -n "$new_val" && -n "$field" ]]; then
+                        tui_close_dialog
+                        echo "edit:$field:$new_val"
+                        return 0
+                    fi
+                fi
+                
+                # 編集キャンセルまたは完了後、ダイアログを再描画するために一度閉じてループ継続（再帰呼び出しは避ける）
+                # ここではシンプルに閉じて、呼び出し元で再オープンしてもらうのが安全だが
+                # TUI構造上、一度閉じてリフレッシュが必要
+                tui_restore_cursor
+                tui_mark_dirty
+                tui_refresh
+                # 再描画 (再帰呼び出し)
+                tui_task_detail_dialog "$task_id"
+                return 0
                 ;;
             r)
                 # Reset task
                 tui_close_dialog
-                return "reset"
+                echo "reset"
+                return 0
                 ;;
             $KEY_ESCAPE|q)
                 tui_close_dialog
-                return "close"
+                echo "close"
+                return 0
                 ;;
         esac
     done
@@ -571,6 +629,121 @@ tui_error_dialog() {
 }
 
 # =============================================================================
+# 選択ダイアログ (汎用)
+# =============================================================================
+
+# 選択ダイアログを表示
+# 引数: タイトル, 選択肢配列(スペース区切り文字列), デフォルトインデックス(0-based), 幅, 高さ
+# 戻り値: 選択された項目の値 (標準出力), 終了コード0 (キャンセル時は1)
+tui_selection_dialog() {
+    local title="$1"
+    # 配列として受け取るために eval を使うか、IFSで分割する
+    # ここではスペース区切りの文字列を配列に変換する
+    local options_str="$2"
+    local default_index="${3:-0}"
+    local width=${4:-50}
+    local height=${5:-10}
+
+    local -a options
+    read -r -a options <<< "$options_str"
+
+    local rows=$(tui_get_rows)
+    local cols=$(tui_get_cols)
+    local dialog_row=$(( (rows - height) / 2 ))
+    local dialog_col=$(( (cols - width) / 2 ))
+
+    # 背景オーバーレイ
+    tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+
+    # ダイアログボックス
+    tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
+
+    local list_row=$((dialog_row + 2))
+    local list_col=$((dialog_col + 2))
+    local list_width=$((width - 4))
+    local list_height=$((height - 4))
+    local num_options=${#options[@]}
+    local current_index=$default_index
+    local scroll_offset=0
+
+    # スクロール位置の初期調整
+    if [[ $current_index -ge $list_height ]]; then
+        scroll_offset=$((current_index - list_height + 1))
+    fi
+
+    local selected_value=""
+    local result=1
+
+    while true; do
+        # リスト描画
+        local i=0
+        while [[ $i -lt $list_height ]]; do
+            local opt_idx=$((scroll_offset + i))
+            if [[ $opt_idx -ge $num_options ]]; then
+                break
+            fi
+
+            local item="${options[$opt_idx]}"
+            local row=$((list_row + i))
+            
+            tui_move "$row" "$list_col"
+            
+            if [[ $opt_idx -eq $current_index ]]; then
+                printf "${REVERSE}%-${list_width}s${NC}" " ${item}"
+            else
+                printf "%-${list_width}s" " ${item}"
+            fi
+
+            ((i++))
+        done
+
+        # スクロールバー簡易表示 (必要なら)
+        
+        # 入力待ち
+        local key=$(tui_get_key)
+        case "$key" in
+            $KEY_UP|k)
+                if [[ $current_index -gt 0 ]]; then
+                    ((current_index--))
+                    if [[ $current_index -lt $scroll_offset ]]; then
+                        scroll_offset=$current_index
+                    fi
+                fi
+                ;;
+            $KEY_DOWN|j)
+                if [[ $current_index -lt $((num_options - 1)) ]]; then
+                    ((current_index++))
+                    if [[ $current_index -ge $((scroll_offset + list_height)) ]]; then
+                        ((scroll_offset++))
+                    fi
+                fi
+                ;;
+            $KEY_ENTER)
+                selected_value="${options[$current_index]}"
+                result=0
+                break
+                ;;
+            $KEY_ESCAPE|q)
+                result=1
+                break
+                ;;
+        esac
+    done
+
+    # ダイアログを閉じる
+    tui_restore_cursor
+    tui_mark_dirty
+    tui_refresh
+
+    if [[ $result -eq 0 ]]; then
+        echo "$selected_value"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# =============================================================================
 # エクスポート
 # =============================================================================
 
@@ -583,5 +756,7 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     export -f tui_draw_overlay
     export -f tui_task_detail_dialog
     export -f tui_help_dialog
+    export -f tui_error_dialog
+    export -f tui_selection_dialog
     export -f tui_error_dialog
 fi

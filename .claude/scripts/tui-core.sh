@@ -9,47 +9,47 @@
 # =============================================================================
 
 # Primary Colors
-COLOR_PRIMARY='\033[38;5;33m'      # Blue
-COLOR_SECONDARY='\033[38;5;98m'    # Purple
-COLOR_SUCCESS='\033[38;5;82m'      # Green
-COLOR_WARNING='\033[38;5;214m'     # Orange
-COLOR_ERROR='\033[38;5;203m'       # Red
-COLOR_INFO='\033[38;5;39m'         # Cyan
+COLOR_PRIMARY=$'\033[38;5;33m'      # Blue
+COLOR_SECONDARY=$'\033[38;5;98m'    # Purple
+COLOR_SUCCESS=$'\033[38;5;82m'      # Green
+COLOR_WARNING=$'\033[38;5;214m'     # Orange
+COLOR_ERROR=$'\033[38;5;203m'       # Red
+COLOR_INFO=$'\033[38;5;39m'         # Cyan
 
 # Neutral Colors
-COLOR_BG='\033[48;5;236m'          # Dark background
-COLOR_FG='\033[38;5;250m'          # Light foreground
-COLOR_DIM='\033[38;5;244m'         # Dim text
-COLOR_BORDER='\033[38;5;240m'      # Border
+COLOR_BG=$'\033[48;5;236m'          # Dark background
+COLOR_FG=$'\033[38;5;250m'          # Light foreground
+COLOR_DIM=$'\033[38;5;244m'         # Dim text
+COLOR_BORDER=$'\033[38;5;240m'      # Border
 
 # Status Colors
-COLOR_PENDING='\033[38;5;244m'     # Gray
-COLOR_IN_PROGRESS='\033[38;5;226m' # Yellow
-COLOR_REVIEW='\033[38;5;147m'      # Light purple
-COLOR_COMPLETED='\033[38;5;82m'    # Green
-COLOR_REJECTED='\033[38;5;203m'    # Red
+COLOR_PENDING=$'\033[38;5;244m'     # Gray
+COLOR_IN_PROGRESS=$'\033[38;5;226m' # Yellow
+COLOR_REVIEW=$'\033[38;5;147m'      # Light purple
+COLOR_COMPLETED=$'\033[38;5;82m'    # Green
+COLOR_REJECTED=$'\033[38;5;203m'    # Red
 
 # Agent Colors
-COLOR_ARCHITECT='\033[38;5;147m'  # Light purple
-COLOR_FRONTEND='\033[38;5;81m'     # Cyan
-COLOR_BACKEND='\033[38;5;107m'     # Green
-COLOR_TESTER='\033[38;5;229m'      # Pink
-COLOR_REVIEWER='\033[38;5;215m'    # Orange
-COLOR_DOCS='\033[38;5;244m'        # Gray
+COLOR_ARCHITECT=$'\033[38;5;147m'  # Light purple
+COLOR_FRONTEND=$'\033[38;5;81m'     # Cyan
+COLOR_BACKEND=$'\033[38;5;107m'     # Green
+COLOR_TESTER=$'\033[38;5;229m'      # Pink
+COLOR_REVIEWER=$'\033[38;5;215m'    # Orange
+COLOR_DOCS=$'\033[38;5;244m'        # Gray
 
 # Priority Colors
-COLOR_CRITICAL='\033[38;5;203m'    # Red
-COLOR_HIGH='\033[38;5;214m'        # Orange
-COLOR_NORMAL='\033[38;5;226m'      # Yellow
-COLOR_LOW='\033[38;5;82m'          # Green
+COLOR_CRITICAL=$'\033[38;5;203m'    # Red
+COLOR_HIGH=$'\033[38;5;214m'        # Orange
+COLOR_NORMAL=$'\033[38;5;226m'      # Yellow
+COLOR_LOW=$'\033[38;5;82m'          # Green
 
 # Reset & Styles
-NC='\033[0m'
-BOLD='\033[1m'
-DIM='\033[2m'
-UNDERLINE='\033[4m'
-BLINK='\033[5m'
-REVERSE='\033[7m'
+NC=$'\033[0m'
+BOLD=$'\033[1m'
+DIM=$'\033[2m'
+UNDERLINE=$'\033[4m'
+BLINK=$'\033[5m'
+REVERSE=$'\033[7m'
 
 # =============================================================================
 # 画面制御関数
@@ -89,15 +89,17 @@ tui_show_cursor() {
 
 # 画面サイズを取得
 tui_get_size() {
-    echo "$(tput lines) $(tput cols)"
+    echo "$(tput lines 2>/dev/null | tr -d '[:space:]') $(tput cols 2>/dev/null | tr -d '[:space:]')"
 }
 
 tui_get_rows() {
-    tput lines
+    local rows=$(tput lines 2>/dev/null | tr -d '[:space:]')
+    echo "${rows:-24}"
 }
 
 tui_get_cols() {
-    tput cols
+    local cols=$(tput cols 2>/dev/null | tr -d '[:space:]')
+    echo "${cols:-80}"
 }
 
 # =============================================================================
@@ -196,18 +198,25 @@ tui_init_terminal() {
         return 0
     fi
 
-    # 現在の設定を保存
-    TUI_STTY_SETTINGS=$(stty -g)
+    # TTYチェック
+    if [[ ! -t 0 ]]; then
+        return 1
+    fi
 
-    # TUI用設定
-    stty -echo           # エコー無効化
-    stty -icanon         # キャノンカルモード無効化（1文字ずつ入力）
-    tui_hide_cursor      # カーソル非表示
+    # 現在の設定を保存（エラーハンドリング付き）
+    TUI_STTY_SETTINGS=$(stty -g 2>/dev/null) || return 1
+
+    # TUI用設定（エラーを無視して継続）
+    stty -echo -icanon 2>/dev/null || true
+
+    # カーソル非表示
+    tui_hide_cursor 2>/dev/null || true
 
     # 終了時のクリーンアップを設定
     trap tui_cleanup_terminal EXIT INT TERM
 
     TUI_TERMINAL_INITIALIZED=true
+    return 0
 }
 
 # 端末設定を復元
@@ -216,16 +225,17 @@ tui_cleanup_terminal() {
         return 0
     fi
 
-    # 設定を復元
+    # 設定を復元（エラーハンドリング付き）
     if [[ -n "$TUI_STTY_SETTINGS" ]]; then
-        stty "$TUI_STTY_SETTINGS" 2>/dev/null
+        stty "$TUI_STTY_SETTINGS" 2>/dev/null || true
     fi
 
-    tui_show_cursor
-    tui_clear
-    tui_restore_cursor
+    tui_show_cursor 2>/dev/null || true
+    tui_clear 2>/dev/null || true
+    tui_restore_cursor 2>/dev/null || true
 
     TUI_TERMINAL_INITIALIZED=false
+    return 0
 }
 
 # =============================================================================
@@ -435,15 +445,23 @@ tui_get_tasks() {
 tui_get_tasks_by_status() {
     local status="$1"
     local tasks_file=$(tui_get_tasks_file)
-    jq -r --arg status "$status" \
-        '.tasks[] | select(.status == $status)' \
+    if [[ ! -f "$tasks_file" ]]; then
+        echo "[]"
+        return
+    fi
+    jq -c --arg status "$status" \
+        '[.tasks[] | select(.status == $status)]' \
         "$tasks_file" 2>/dev/null || echo "[]"
 }
 
 # タスク統計を取得
 tui_get_stats() {
     local tasks_file=$(tui_get_tasks_file)
-    jq -r '{
+    if [[ ! -f "$tasks_file" ]]; then
+        echo '{"total":0,"completed":0,"in_progress":0,"pending":0,"review_needed":0,"rejected":0}'
+        return
+    fi
+    jq -c '{
         total: (.tasks | length),
         completed: ([.tasks[] | select(.status == "completed")] | length),
         in_progress: ([.tasks[] | select(.status == "in_progress")] | length),
