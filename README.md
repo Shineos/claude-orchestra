@@ -8,7 +8,7 @@
 
 **Claude Code を活用した自律型マルチエージェント開発基盤**
 
-[特徴](#特徴) • [インストール](#インストール) • [使い方](#使い方) • [アーキテクチャ](#アーキテクチャ)
+[特徴](#-特徴) • [インストール](#-インストール) • [使い方](#-使い方) • [アーキテクチャ](#-アーキテクチャ)
 
 </div>
 
@@ -97,25 +97,64 @@ alias agent='bash .claude/agent.sh' # 個別にエージェントを動かす場
 
 ```mermaid
 graph TD
-    User[👤 User] -->|1. orch add| Orchestrator[🎻 Orchestrator]
-    Orchestrator -->|2. Analyze & Plan| Planner[🧠 Planner Agent]
-    Planner -->|3. Decompose| Tasks[📋 Tasks JSON]
+    User[👤 ユーザー] <-->|対話操作| Dashboard[📺 TUIダッシュボード]
+    User -->|CLIコマンド| Orchestrator[🎻 オーケストレーター]
     
-    subgraph "Agent Team"
-        Frontend[🎨 Frontend]
-        Backend[⚙️ Backend]
-        Tests[test Tests]
-        Docs[📚 Docs]
+    Dashboard -->|トリガー| Orchestrator
+    
+    Orchestrator -->|分析 & 計画| Planner[🧠 Planner エージェント]
+    Planner -->|タスク分解| Tasks[📋 タスクJSON]
+    
+    subgraph "エージェントチーム"
+        Frontend[🎨 フロントエンド]
+        Backend[⚙️ バックエンド]
+        Tests[🧪 テスト]
+        Docs[📚 ドキュメント]
     end
     
-    Orchestrator -->|4. Dispatch| Frontend
-    Orchestrator -->|4. Dispatch| Backend
-    Orchestrator -->|4. Dispatch| Tests
-    Orchestrator -->|4. Dispatch| Docs
+    Orchestrator -->|割り当て| Frontend
+    Orchestrator -->|割り当て| Backend
+    Orchestrator -->|割り当て| Tests
+    Orchestrator -->|割り当て| Docs
     
-    Frontend -->|5. Update| Dashboard[📺 TUI Dashboard]
-    Backend -->|5. Update| Dashboard
-    Tests -->|5. Update| Dashboard
+    Frontend -->|更新| Tasks
+    Backend -->|更新| Tasks
+    Tests -->|更新| Tasks
+    Docs -->|更新| Tasks
+    
+    Tasks -->|反映| Dashboard
+```
+
+### 🔄 フローチャート
+
+```mermaid
+flowchart TD
+    Start([開始]) --> Input{入力方法}
+    
+    Input -->|CLI: orch add| Analyze[分析 & 計画]
+    Input -->|TUI: タスク追加| Analyze
+    
+    Analyze -->|Planner エージェント| Decompose[タスク分解]
+    Decompose -->|保存| DB[(タスクJSON)]
+    
+    DB -->|監視| Dispatcher[オーケストレーター]
+    
+    Dispatcher -->|自動開始| Execution{実行エージェント}
+    
+    Execution -->|フロントエンド| FE[🎨 Frontend エージェント]
+    Execution -->|バックエンド| BE[⚙️ Backend エージェント]
+    Execution -->|テスト| TE[🧪 Tests エージェント]
+    Execution -->|ドキュメント| DO[📚 Docs エージェント]
+    
+    FE -->|実行 & ログ| Update[ステータス更新]
+    BE -->|実行 & ログ| Update
+    TE -->|実行 & ログ| Update
+    DO -->|実行 & ログ| Update
+    
+    Update -->|書き込み| DB
+    
+    DB -->|自動更新| Dashboard[📺 TUIダッシュボード]
+    Dashboard -->|表示 & 操作| User[👤 ユーザー]
 ```
 
 ## 🎮 使い方
