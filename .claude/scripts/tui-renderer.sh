@@ -121,6 +121,24 @@ tui_draw_selection_cursor() {
     printf "${NC}"
 }
 
+# 進捗バーを描画
+tui_progress_bar() {
+    local percentage=$1
+    local width=${2:-30}
+    local filled_char="${3:-█}"
+    local empty_char="${4:-░}"
+    local color="${5:-$COLOR_SUCCESS}"
+
+    local filled=$(( width * percentage / 100 ))
+    local empty=$(( width - filled ))
+
+    printf "[${color}"
+    tui_repeat "$filled" "$filled_char"
+    printf "${NC}${COLOR_DIM}"
+    tui_repeat "$empty" "$empty_char"
+    printf "${NC}] %3d%%" "$percentage"
+}
+
 # =============================================================================
 # タスクカード描画
 # =============================================================================

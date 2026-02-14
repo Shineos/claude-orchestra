@@ -7,9 +7,9 @@
 if [[ -n "${BATS_TEST_FILENAME}" ]]; then
     # BATS_TEST_FILENAME is like: /path/to/tests/acceptance/test.bats
     # dirname gives: /path/to/tests/acceptance
-    # We need to go up 2 levels: acceptance -> tests -> project_root
+    # We need to go up 3 levels: acceptance -> tests -> project_root
     TEST_DIR="$(dirname "${BATS_TEST_FILENAME}")"
-    PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${TEST_DIR}/.." && pwd)}"
+    PROJECT_ROOT="${PROJECT_ROOT:-$(cd "${TEST_DIR}/../.." && pwd)}"
 else
     # Fallback when running outside of BATS
     # BASH_SOURCE[0] is this file: /path/to/tests/helpers/bats_helper.bash

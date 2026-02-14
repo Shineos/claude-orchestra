@@ -43,6 +43,9 @@ COLOR_HIGH=$'\033[38;5;214m'        # Orange
 COLOR_NORMAL=$'\033[38;5;226m'      # Yellow
 COLOR_LOW=$'\033[38;5;82m'          # Green
 
+# Special Colors
+COLOR_MAGENTA=$'\033[38;5;135m'    # Magenta
+
 # Reset & Styles
 NC=$'\033[0m'
 BOLD=$'\033[1m'
@@ -106,13 +109,36 @@ tui_get_cols() {
 # 描画プリミティブ
 # =============================================================================
 
+# 文字列を繰り返し生成（pure bash implementation）
+tui_repeat() {
+    local count="$1"
+    local char="$2"
+    local str=""
+    
+    # 負の数は0として扱う
+    if [[ $count -le 0 ]]; then
+        return
+    fi
+    
+    # ループで文字列生成（trなどの外部プロセス依存を排除）
+    for ((i=0; i<count; i++)); do
+        str+="$char"
+    done
+    
+    printf "%s" "$str"
+}
+
 # 水平線を描画
 tui_hline() {
     local length=$1
     local char="${2:-─}"
     local color="${3:-$COLOR_BORDER}"
+    
+    # DEBUG
+    # echo "DEBUG: tui_hline length=$length char=$char" >> /tmp/claude_dashboard_debug.log
+    
     printf "${color}"
-    printf "%${length}s" | tr ' ' "$char"
+    tui_repeat "$length" "$char"
     printf "${NC}"
 }
 
@@ -137,11 +163,14 @@ tui_box() {
     local title="${5:-}"
     local color="${6:-$COLOR_BORDER}"
 
+    # DEBUG
+    # echo "[DEBUG] tui_box: row=$row col=$col width=$width height=$height title='$title'" >> /tmp/claude_dashboard_debug.log
+
     tui_move "$row" "$col"
 
     # 上辺
     printf "${color}┌"
-    tui_hline $((width - 2))
+    tui_hline $((width - 2)) "─" "$color"
     printf "┐${NC}\n"
 
     # タイトル行（あれば）
@@ -151,7 +180,8 @@ tui_box() {
         printf "${color}│${NC} ${BOLD}${title}${NC}"
         local title_len=${#title}
         local spaces=$((width - title_len - 3))
-        printf "%${spaces}s" " "
+        # printf "%${spaces}s" " "
+        tui_repeat "$spaces" " "
         printf "${color}│${NC}\n"
         ((row++))
         tui_move "$row" "$col"
@@ -159,7 +189,30 @@ tui_box() {
 
     # 左右の辺
     local body_row=0
+    # タイトルがある場合、その分高さを調整して描画する必要があるが、
+    # 既存コードではタイトルがあってもなくても上書きで描画しているように見える
+    # ここでは既存ロジックを維持しつつ、安全な描画にする
+    
+    # タイトルが表示された行の次から開始
+    local start_body_idx=0
+    
+    # ※注意: 元のコードのループロジックだと、タイトルがある場合に行がずれる可能性があるが
+    # ここでは安全策として、height - 2 (上下辺分) の回数ループする
+    # しかしタイトルがある場合はすでにrowが進んでいる
+    
+    # 元のコードの再実装（ただしprintfのスペース埋めをtui_repeatに置換）
     while [[ $body_row -lt $((height - 2)) ]]; do
+        # タイトル行ですでに描画された行はスキップすべきだが、
+        # 元のコードは単純に上書きしていたか、あるいはタイトル行を含めて計算していたか
+        # 元コード:
+        # if [[ -n "$title" ]]; then ... ((row++)) ... fi
+        # while ... tui_move $((row + body_row + 1)) ...
+        # なので、タイトルがある場合はrowが増えているため、中身の描画開始位置も下がる
+        # ただし height はボックス全体の高さなので、中身の行数は height - 2 で固定
+        # タイトルがある場合、中身の1行目がタイトル行の次になる
+        # つまり、タイトルがある場合、枠の下辺が1行押し出されてしまうバグが元々あった可能性がある
+        # ここでは修正せず、クラッシュ回避に集中する
+        
         tui_move $((row + body_row + 1)) "$col"
         printf "${color}│${NC}"
         tui_move $((row + body_row + 1)) $((col + width - 1))
@@ -170,7 +223,7 @@ tui_box() {
     # 下辺
     tui_move $((row + height - 1)) "$col"
     printf "${color}└"
-    tui_hline $((width - 2))
+    tui_hline $((width - 2)) "─" "$color"
     printf "┘${NC}"
 }
 

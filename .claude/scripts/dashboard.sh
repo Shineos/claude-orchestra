@@ -19,6 +19,7 @@ ORCHESTRATOR="$SCRIPT_DIR/orchestrator.sh"
 source "$SCRIPT_DIR/tui-core.sh"
 source "$SCRIPT_DIR/tui-keyboard.sh"
 source "$SCRIPT_DIR/tui-dialogs.sh"
+source "$SCRIPT_DIR/tui-renderer.sh"
 
 # Unicode罫線文字
 BOX_TL="┌"
@@ -391,76 +392,217 @@ read_key() {
 prompt_input() {
     local prompt="$1"
     local height=$(get_terminal_height)
-    
-    # 入力を受け付ける設定 (ICANONオフ、エコーオフで取得)
-    stty -icanon -echo >&2
-    tput cnorm >&2
-    
-    # プロンプト表示
-    tput cup $((height - 1)) 0 >&2
-    tput el >&2
+
+    # 画面下部に移動（tputを使わずANSIシーケンスで直接実行）
+    # サブシェル内ではtputが不安定なため、printfでエスケープシーケンスを出力
+    printf "\033[%d;0H" "$((height - 1))" >&2  # tput cup $((height - 1)) 0
+    printf "\033[2K" >&2  # tput el (行をクリア)
     printf "%b" "${BOLD}${COLOR_PRIMARY}❯ ${prompt}: ${NC}" >&2
+
+    # 入力用の端末設定（標準入力モード）
+    # 注意: TUIモードから一旦離脱して入力を受付
+    # tput cnorm >&2  # コマンド置換内ではtputが不安定なため削除
+
+    # stty設定を保存してから通常モードに切替
+    local old_settings=$(stty -g 2>/dev/null)
+    stty echo icanon >&2
+
+    # read で入力を取得（read -e はrawモードで不安定なため、read -rを使用）
+    local input
+    IFS= read -r input
+    local read_status=$?
+
+    # TUIモードに復帰
+    stty "$old_settings" 2>/dev/null || true
+    setup_terminal >&2  # Output to stderr to avoid capturing in command substitution
+
+    # 入力文字列をクリーニング（制御文字とANSIエスケープシーケンスを削除）
+    # ANSIエスケープシーケンス (\x1b[ または \033[ で始まるシーケンス) を削除
+    # 例: ^[[?25l (DECSTR), ^[[A (CUU), ^[[2K (EL), など
+    local cleaned=$(echo "$input" | sed -E 's/\x1b\[[0-9;:*[a-zA-Z]//g; s/\x1b\?.?//g; s/\x1b.//g; s/\r//g; s/^[[:space:]]+//; s/[[:space:]]+$//')
+
+    # DEBUG LOG (Removed)
+    # echo "[DEBUG] prompt_input: raw='$input', cleaned='$cleaned', status=$read_status" >> /tmp/claude_dashboard_debug.log
+
+    # 入力後の改行の影響を除去（tputを避けてprintfで直接実行）
+    printf "\033[A" >&2  # cuu1: カーソルを1行上へ
+    printf "\033[2K" >&2  # el: 行をクリア
+
+    # トリムして返す
+    printf "%s\n" "$cleaned"
+    return 0
+}
+
+# 編集用プロンプト（デフォルト値あり、画面下部）
+prompt_edit_bottom() {
+    local prompt="$1"
+    local default_value="$2"
+    local height=$(get_terminal_height)
+    local width=$(get_terminal_width)
     
-    local input=""
-    local char=""
-    local key=""
+    local input="$default_value"
+    local cursor_pos=${#input}
+    local input_area_width=$((width - ${#prompt} - 6))
+    
+    # カーソル表示
+    printf "\033[?25h" >&2
+    
+    # 入力バッファをクリア
+    if declare -f tui_flush_input >/dev/null; then
+        tui_flush_input
+    fi
 
     while true; do
-        # 1文字読み取り (Bash組み込み read -rsn1 を使用)
-        IFS= read -rsn1 key
+        # 画面下部に描画
+        printf "\033[%d;0H" "$((height - 1))" >&2
+        printf "\033[2K" >&2
+        printf "%b" "${BOLD}${COLOR_PRIMARY}❯ ${prompt}: ${NC}" >&2
         
-        # Enterキー (空文字または改行)
-        if [[ -z "$key" || "$key" == $'\n' || "$key" == $'\r' ]]; then
-            printf "\n" >&2
-            break
+        # 入力をボックス的に表示
+        printf "${COLOR_PRIMARY}[${NC}${input}" >&2
+        
+        # 残りをスペースで埋める（簡易的）
+        local remaining=$((input_area_width - ${#input}))
+        if [[ $remaining -gt 0 ]]; then
+            printf "%${remaining}s" "" >&2
         fi
+        printf "${COLOR_PRIMARY}]${NC}" >&2
         
-        # ESCキー ($'\e')
-        if [[ "$key" == $'\e' ]]; then
-            # キャンセル時は空を返す
-            input=""
-            printf "\n" >&2
-            break
-        fi
+        # カーソル位置を合わせる
+        local prompt_len=$(( ${#prompt} + 4 ))
+        printf "\033[%d;%dH" "$((height - 1))" "$((prompt_len + cursor_pos + 1))" >&2
         
-        # Backspace (DEL: \x7f または BS: \b)
-        # 注意: read -n1 ではDELも文字として取得される
-        if [[ "$key" == $'\x7f' || "$key" == $'\b' ]]; then
-            if [[ ${#input} -gt 0 ]]; then
-                # 末尾1文字を削除 (マルチバイト文字対応は簡易的にバイト単位削除かもしれないが、
-                # ここでは表示上の整合性を重視して、最後の文字を取り除く)
-                input="${input%?}"
-                
-                # 画面上のカーソルを戻して1文字消す (バックスペース・空白・バックスペース)
-                printf "\b \b" >&2
+        local raw_key=$(tui_get_key)
+        local key="${raw_key%_}"
+        
+        case "$key" in
+            "$KEY_ENTER")
+                echo "$input"
+                return 0
+                ;;
+            "$KEY_ESCAPE")
+                return 1
+                ;;
+            "$KEY_BACKSPACE"|"$'\x7f'")
+                if [[ $cursor_pos -gt 0 ]]; then
+                    input="${input:0:$((cursor_pos - 1))}${input:$cursor_pos}"
+                    ((cursor_pos--))
+                fi
+                ;;
+            "TIMEOUT")
+                continue
+                ;;
+            *)
+                # 通常文字（簡易的なバリデーション）
+                if [[ ${#key} -eq 1 ]] && [[ "$key" =~ [[:print:]] ]]; then
+                    if [[ ${#input} -lt $input_area_width ]]; then
+                        input="${input:0:$cursor_pos}${key}${input:$cursor_pos}"
+                        ((cursor_pos++))
+                    fi
+                fi
+                ;;
+        esac
+    done
+}
+
+# 全タスクIDを取得（スペース区切り）
+get_all_task_ids() {
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        echo ""
+        return
+    fi
+    jq -r '.tasks | sort_by(.id) | .[].id' "$TASKS_FILE" | xargs echo
+}
+
+# 水平選択プロンプト（エージェント選択用）
+prompt_select_horizontal() {
+    local prompt="$1"
+    local options_str="$2"
+    local selected_idx="${3:-0}"
+    
+    local options=($options_str)
+    local count=${#options[@]}
+    local height=$(get_terminal_height)
+    
+    # カーソル非表示
+    printf "\033[?25l" >&2
+    
+    # 入力バッファをクリア
+    if declare -f tui_flush_input >/dev/null; then
+        tui_flush_input
+    fi
+
+    while true; do
+        # 画面下部（prompt_inputと同じ位置）に描画
+        # input area is height-1 based on prompt_input logic
+        printf "\033[%d;0H" "$((height - 1))" >&2
+        printf "\033[2K" >&2
+        printf "%b" "${BOLD}${COLOR_PRIMARY}❯ ${prompt}: ${NC}" >&2
+        
+        for ((i=0; i<count; i++)); do
+            if [[ $i -eq $selected_idx ]]; then
+                # 選択中: 反転表示
+                printf "%b" "${REVERSE} ${options[$i]} ${NC} " >&2
+            else
+                # 非選択: 薄い色
+                printf "%b" "${COLOR_DIM} ${options[$i]} ${NC} " >&2
             fi
+        done
+        
+        # キー入力待機
+        local raw_key=$(tui_get_key)
+        local key="${raw_key%_}"
+        
+        if [[ "$key" == "TIMEOUT" ]]; then
             continue
         fi
-
-        # 通常文字の追加
-        # 制御文字を除外 (印字可能な文字のみ)
-        if [[ "$key" =~ [[:print:]] ]]; then
-            input+="$key"
-            printf "%s" "$key" >&2
+        
+        if [[ "$key" == "EOF" ]]; then
+            return 1
         fi
+
+        
+        case "$key" in
+            "$KEY_LEFT"|"h")
+                ((selected_idx--))
+                # ループさせる
+                if [[ $selected_idx -lt 0 ]]; then selected_idx=$((count - 1)); fi
+                ;;
+            "$KEY_RIGHT"|"l")
+                ((selected_idx++))
+                # ループさせる
+                if [[ $selected_idx -ge $count ]]; then selected_idx=0; fi
+                ;;
+            "$KEY_ENTER")
+                printf "%s" "${options[$selected_idx]}"
+                # 完了後のクリーンアップ
+                printf "\033[%d;0H" "$((height - 1))" >&2
+                printf "\033[2K" >&2
+                return 0
+                ;;
+            "$KEY_ESCAPE"|"q")
+                # キャンセル
+                printf "\033[%d;0H" "$((height - 1))" >&2
+                printf "\033[2K" >&2
+                return 1
+                ;;
+        esac
     done
-    
-    # ターミナル設定を元に戻す
-    setup_terminal >&2
-    
-    # 入力後の改行の影響を除去
-    tput cuu1 >&2
-    tput el >&2
-    
-    # トリムして返す
-    local cleaned=$(echo "$input" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    echo "$cleaned"
 }
 
 # タスク追加
-# タスク追加
 add_task_interactive() {
-    local task_desc=$(prompt_input "タスク説明を入力")
+    # echo "[DEBUG] Starting add_task_interactive" >> /tmp/claude_dashboard_debug.log
+    
+    # echo "[DEBUG] Calling prompt_input..." >> /tmp/claude_dashboard_debug.log
+    # set +e to prevent crash if comsub fails (though prompt_input returns 0)
+    local task_desc
+    if ! task_desc=$(prompt_input "タスク説明を入力"); then
+        # echo "[ERROR] prompt_input failed with exit code $?" >> /tmp/claude_dashboard_debug.log
+        return 1
+    fi
+    
+    # echo "[DEBUG] Got task_desc='$task_desc'" >> /tmp/claude_dashboard_debug.log
     
     if [[ -n "$task_desc" ]]; then
         # 画面サイズに応じたダイアログ幅の計算
@@ -472,33 +614,48 @@ add_task_interactive() {
         local agents="Auto(AI) frontend backend tests docs planner architect coder reviewer tester"
         local agent=""
         
-        # tui_selection_dialog が利用可能か確認（sourceされているか）
-        if declare -f tui_selection_dialog >/dev/null; then
-            if ! agent=$(tui_selection_dialog "Select Agent" "$agents" 0 "$dialog_width" 12); then
-                # キャンセルされた場合
-                draw_dashboard
-                return
-            fi
+        # New: Use horizontal selection prompt
+        if agent=$(prompt_select_horizontal "Select Agent" "$agents" 0); then
+             # Success
+             :
         else
-            # フォールバック: デフォルトを使用
-            echo "Debug: tui_selection_dialog not found" >> /tmp/claude_dash_debug.log
-            agent="planner"
+             # Cancelled
+             draw_dashboard
+             return
         fi
 
+        # Auto(AI) の場合は空文字にする（orchestratorで自動判定させるため）
+
+        
+        # 画面を一時的にクリアしてコマンド実行結果を見せる
+        tui_clear
+        echo "Adding task: $task_desc..."
+        
+        # Check command
+        # echo "[DEBUG] Running orchestrator add" >> /tmp/claude_dashboard_debug.log
+        
         local tmp_out="/tmp/claude_dash_cmd.log"
         local success=false
 
         if [[ "$agent" == "Auto(AI)" ]]; then
             show_message "🤖 AIがタスクを分析・分解中..." "$COLOR_MAGENTA"
             # Autoモード: エージェント指定なしで実行し、自動確認を有効化
-            if ORCH_AUTO_CONFIRM=yes LAUNCH_AFTER_ADD=false bash "$ORCHESTRATOR" add "$task_desc" > "$tmp_out" 2>&1; then
+            if ORCH_AUTO_CONFIRM=yes ORCH_AUTO_LAUNCH=no bash "$ORCHESTRATOR" add "$task_desc" > "$tmp_out" 2>&1; then
                 success=true
+                # echo "[DEBUG] Orchestrator success" >> /tmp/claude_dashboard_debug.log
+            else
+                # echo "[DEBUG] Orchestrator failed: $(cat $tmp_out)" >> /tmp/claude_dashboard_debug.log
+                :
             fi
         else
             show_message "⏳ タスクを追加中 ($agent)..." "$COLOR_PRIMARY"
             # 通常モード: エージェント指定あり
-            if LAUNCH_AFTER_ADD=false bash "$ORCHESTRATOR" add "$task_desc" "$agent" > "$tmp_out" 2>&1; then
+            if ORCH_AUTO_LAUNCH=no bash "$ORCHESTRATOR" add "$task_desc" "$agent" > "$tmp_out" 2>&1; then
                 success=true
+                # echo "[DEBUG] Orchestrator success" >> /tmp/claude_dashboard_debug.log
+            else
+                # echo "[DEBUG] Orchestrator failed: $(cat $tmp_out)" >> /tmp/claude_dashboard_debug.log
+                :
             fi
         fi
 
@@ -521,9 +678,21 @@ add_task_interactive() {
     fi
 }
 
+
 # タスク開始
 start_task_interactive() {
-    local task_id=$(prompt_input "開始するタスクID")
+    local ids=$(get_all_task_ids)
+    if [[ -z "$ids" ]]; then
+        show_message "✗ タスクが見つかりません" "$COLOR_ERROR"
+        draw_dashboard
+        return
+    fi
+    
+    local task_id
+    if ! task_id=$(prompt_select_horizontal "開始対象" "$ids"); then
+        draw_dashboard
+        return
+    fi
     
     if [[ -n "$task_id" ]]; then
         show_message "⏳ タスク #$task_id を開始中..." "$COLOR_PRIMARY"
@@ -544,7 +713,18 @@ start_task_interactive() {
 
 # タスク完了
 complete_task_interactive() {
-    local task_id=$(prompt_input "完了するタスクID")
+    local ids=$(get_all_task_ids)
+    if [[ -z "$ids" ]]; then
+        show_message "✗ タスクが見つかりません" "$COLOR_ERROR"
+        draw_dashboard
+        return
+    fi
+    
+    local task_id
+    if ! task_id=$(prompt_select_horizontal "完了対象" "$ids"); then
+        draw_dashboard
+        return
+    fi
     
     if [[ -n "$task_id" ]]; then
         show_message "⏳ タスク #$task_id を完了中..." "$COLOR_PRIMARY"
@@ -562,7 +742,18 @@ complete_task_interactive() {
 
 # タスク編集
 edit_task_interactive() {
-    local task_id=$(prompt_input "編集するタスクID")
+    local ids=$(get_all_task_ids)
+    if [[ -z "$ids" ]]; then
+        show_message "✗ タスクが見つかりません" "$COLOR_ERROR"
+        draw_dashboard
+        return
+    fi
+    
+    local task_id
+    if ! task_id=$(prompt_select_horizontal "編集対象" "$ids"); then
+        draw_dashboard
+        return
+    fi
     
     if [[ -n "$task_id" ]]; then
         # 現在のタスク情報を取得
@@ -574,23 +765,10 @@ edit_task_interactive() {
             return
         fi
 
-        # tui_input_dialog が利用可能か確認
-        local new_desc=""
-        if declare -f tui_input_dialog >/dev/null; then
-             # 画面サイズに応じたダイアログ幅の計算
-            local width=$(get_terminal_width)
-            local dialog_width=$((width - 10))
-            if [[ $dialog_width -gt 60 ]]; then dialog_width=60; fi
-            
-            if ! new_desc=$(tui_input_dialog "Edit Task #$task_id" "Description:" "$current_desc" "$dialog_width" 8); then
-                draw_dashboard
-                return
-            fi
-        else
-            # フォールバック: prompt_inputを使用（デフォルト値表示はできないが実装簡易化）
-            show_message "Current: $current_desc" "$COLOR_INFO"
-            sleep 1
-            new_desc=$(prompt_input "新しい説明 (空でキャンセル)")
+        local new_desc
+        if ! new_desc=$(prompt_edit_bottom "新しい説明" "$current_desc"); then
+            draw_dashboard
+            return
         fi
         
         if [[ -n "$new_desc" && "$new_desc" != "$current_desc" ]]; then
@@ -616,7 +794,18 @@ edit_task_interactive() {
 
 # タスク削除
 delete_task_interactive() {
-    local task_id=$(prompt_input "削除するタスクID")
+    local ids=$(get_all_task_ids)
+    if [[ -z "$ids" ]]; then
+        show_message "✗ タスクが見つかりません" "$COLOR_ERROR"
+        draw_dashboard
+        return
+    fi
+    
+    local task_id
+    if ! task_id=$(prompt_select_horizontal "削除対象" "$ids"); then
+        draw_dashboard
+        return
+    fi
     
     if [[ -n "$task_id" ]]; then
         show_message "⏳ タスク #$task_id を削除中..." "$COLOR_PRIMARY"
@@ -634,7 +823,18 @@ delete_task_interactive() {
 
 # タスク詳細表示
 show_task_detail() {
-    local task_id=$(prompt_input "詳細表示するタスクID")
+    local ids=$(get_all_task_ids)
+    if [[ -z "$ids" ]]; then
+        show_message "✗ タスクが見つかりません" "$COLOR_ERROR"
+        draw_dashboard
+        return
+    fi
+    
+    local task_id
+    if ! task_id=$(prompt_select_horizontal "詳細表示対象" "$ids"); then
+        draw_dashboard
+        return
+    fi
     
     if [[ -n "$task_id" ]]; then
         # tui_task_detail_dialog が利用可能か確認
@@ -757,7 +957,18 @@ show_task_detail() {
 
 # ログ表示
 show_logs_interactive() {
-    local task_id=$(prompt_input "ログを表示するタスクID")
+    local ids=$(get_all_task_ids)
+    if [[ -z "$ids" ]]; then
+        show_message "✗ タスクが見つかりません" "$COLOR_ERROR"
+        draw_dashboard
+        return
+    fi
+    
+    local task_id
+    if ! task_id=$(prompt_select_horizontal "ログ表示対象" "$ids"); then
+        draw_dashboard
+        return
+    fi
     
     if [[ -n "$task_id" ]]; then
         local log_file="$CLAUDE_DIR/tasks/$task_id/logs/agent.log"
@@ -807,13 +1018,13 @@ main_loop() {
         local key=$(read_key)
         
         case "$key" in
-            a) add_task_interactive ;;
-            s) start_task_interactive ;;
-            c) complete_task_interactive ;;
-            l) show_logs_interactive ;;
-            d) delete_task_interactive ;;
-            v) show_task_detail ;;
-            e) edit_task_interactive ;;
+            a) add_task_interactive || true ;;
+            s) start_task_interactive || true ;;
+            c) complete_task_interactive || true ;;
+            l) show_logs_interactive || true ;;
+            d) delete_task_interactive || true ;;
+            v) show_task_detail || true ;;
+            e) edit_task_interactive || true ;;
             w) toggle_auto_refresh ;;
             r) draw_dashboard; LAST_REFRESH=$(date +%s) ;;
             q) break ;;

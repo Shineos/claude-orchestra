@@ -13,3 +13,7 @@ tests/*.log
 
 # spec
 spec/
+# Claude Orchestra state files
+.claude/pids/
+.claude/tasks/
+.claude/tasks.json

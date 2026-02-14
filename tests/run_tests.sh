@@ -75,7 +75,9 @@ done
 BATS_CMD="bats -T"  # -T: Don't require terminal
 
 if [[ "$VERBOSE" == "true" ]]; then
-    BATS_CMD="$BATS_CMD --verbose"
+    # Note: bats-core doesn't have --verbose option
+    # Use --print-output-on-failing-tests and BATS_VERBOSE for helper functions
+    BATS_CMD="$BATS_CMD --print-output-on-failure"
     export BATS_VERBOSE=true
 fi
 

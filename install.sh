@@ -135,8 +135,13 @@ fi
 
 # 7. tasks.json 初期化
 if [[ ! -f "$CLAUDE_DIR/tasks.json" ]]; then
-    echo '{"tasks": [], "last_id": 0}' > "$CLAUDE_DIR/tasks.json"
-    printf "%b" "${GREEN}✓ tasks.json を初期化しました${NC}\n"
+    if [[ -f "$TEMPLATE_DIR/.claude/tasks.json.example" ]]; then
+        cp "$TEMPLATE_DIR/.claude/tasks.json.example" "$CLAUDE_DIR/tasks.json"
+        printf "%b" "${GREEN}✓ tasks.json.example から初期化しました${NC}\n"
+    else
+        echo '{"tasks": [], "last_id": 0}' > "$CLAUDE_DIR/tasks.json"
+        printf "%b" "${GREEN}✓ tasks.json を初期化しました${NC}\n"
+    fi
 fi
 
 echo ""

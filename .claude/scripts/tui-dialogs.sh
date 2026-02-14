@@ -28,8 +28,11 @@ tui_open_dialog() {
 
 # ダイアログを閉じる
 tui_close_dialog() {
-    # スタックからポップ
-    unset 'TUI_DIALOG_STACK[-1]'
+    # スタックからポップ（Bash 3.2互換のため負のインデックスは避ける）
+    local size=${#TUI_DIALOG_STACK[@]}
+    if [[ $size -gt 0 ]]; then
+        unset "TUI_DIALOG_STACK[$((size - 1))]"
+    fi
 
     if [[ ${#TUI_DIALOG_STACK[@]} -eq 0 ]]; then
         TUI_DIALOG_ACTIVE=false
@@ -97,7 +100,7 @@ tui_confirm_dialog() {
     # 入力待ち
     local result
     while true; do
-        local key=$(tui_get_key)
+        local raw_key=$(tui_get_key); local key="${raw_key%_}"
 
         case "$key" in
             y|Y)
@@ -136,96 +139,121 @@ tui_input_dialog() {
     local height=${5:-6}
     local password="${6:-false}"
 
-    local rows=$(tui_get_rows)
-    local cols=$(tui_get_cols)
-    local dialog_row=$(( (rows - height) / 2 ))
-    local dialog_col=$(( (cols - width) / 2 ))
+    local final_input=""
+    local result=1
 
-    # 背景を暗くする
-    tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+    # 画画処理をstderrにリダイレクト
+    {
+        local rows=$(tui_get_rows)
+        local cols=$(tui_get_cols)
+        local dialog_row=$(( (rows - height) / 2 ))
+        local dialog_col=$(( (cols - width) / 2 ))
 
-    # ダイアログボックス
-    tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
+        # 背景を暗くする
+        tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
 
-    # プロンプト
-    tui_move $((dialog_row + 2)) $((dialog_col + 4))
-    printf "${BOLD}${prompt}${NC}"
+        # ダイアログボックス
+        tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
 
-    # 入力欄
-    local input_row=$((dialog_row + 3))
-    local input_col=$((dialog_col + 4))
-    local input_width=$((width - 8))
+        # プロンプト
+        tui_move $((dialog_row + 2)) $((dialog_col + 4))
+        printf "${BOLD}${prompt}${NC}"
 
-    tui_move "$input_row" "$input_col"
-    printf "[${COLOR_PRIMARY}"
+        # 入力欄
+        local input_row=$((dialog_row + 3))
+        local input_col=$((dialog_col + 4))
+        local input_width=$((width - 8))
 
-    # 入力ループ
-    local input="$default_value"
-    local cursor_pos=${#default_value}
-
-    while true; do
-        # 入力欄を描画
         tui_move "$input_row" "$input_col"
-        printf "${COLOR_PRIMARY}[${NC}"
+        printf "[${COLOR_PRIMARY}"
 
-        if [[ "$password" == "true" ]]; then
-            # パスワードモード（*で表示）
-            local masked=""
-            local i=0
-            while [[ $i -lt ${#input} ]]; do
-                masked="${masked}*"
-                ((i++))
-            done
-            printf "%s" "$masked"
-        else
-            # 通常モード
-            printf "${input}"
-        fi
+        # 入力ループ
+        local input="$default_value"
+        local cursor_pos=${#default_value}
 
-        # 残りをスペースで埋める
-        local remaining=$((input_width - ${#input}))
-        printf "%${remaining}s${COLOR_PRIMARY}]${NC} "
+        while true; do
+            # 入力欄を描画
+            tui_move "$input_row" "$input_col"
+            printf "${COLOR_PRIMARY}[${NC}"
 
-        # カーソル位置
-        tui_move "$input_row" $((input_col + cursor_pos + 2))
-        tui_show_cursor
+            if [[ "$password" == "true" ]]; then
+                # パスワードモード（*で表示）
+                local masked=""
+                local i=0
+                while [[ $i -lt ${#input} ]]; do
+                    masked="${masked}*"
+                    ((i++))
+                done
+                printf "%s" "$masked"
+            else
+                # 通常モード
+                printf "${input}"
+            fi
 
-        local key=$(tui_get_key)
+            # 残りをスペースで埋める
+            local remaining=$((input_width - ${#input}))
+            printf "%${remaining}s${COLOR_PRIMARY}]${NC} "
 
-        case "$key" in
-            $KEY_ENTER)
-                tui_hide_cursor
-                echo "$input"
-                return 0
-                ;;
-            $KEY_ESCAPE)
-                tui_hide_cursor
-                return 1
-                ;;
-            $KEY_BACKSPACE)
-                if [[ $cursor_pos -gt 0 ]]; then
-                    input="${input:0:$((cursor_pos - 1))}${input:$cursor_pos}"
-                    ((cursor_pos--))
-                fi
-                ;;
-            TIMEOUT)
-                continue
-                ;;
-            $KEY_CTRL_C)
-                tui_hide_cursor
-                return 1
-                ;;
-            *)
-                # 通常文字
-                if [[ ${#key} -eq 1 ]] && [[ "$key" =~ [[:print:]] ]]; then
-                    if [[ ${#input} -lt $input_width ]]; then
-                        input="${input:0:$cursor_pos}${key}${input:$cursor_pos}"
-                        ((cursor_pos++))
+            # カーソル位置
+            tui_move "$input_row" $((input_col + cursor_pos + 2))
+            tui_show_cursor
+
+            local key
+            local raw_key
+            if ! raw_key=$(tui_get_key); then
+                # EOF or error
+                break
+            fi
+            local key="${raw_key%_}"
+
+            case "$key" in
+                $KEY_ENTER)
+                    final_input="$input"
+                    result=0
+                    break
+                    ;;
+                $KEY_ESCAPE)
+                    result=1
+                    break
+                    ;;
+                $KEY_BACKSPACE)
+                    if [[ $cursor_pos -gt 0 ]]; then
+                        input="${input:0:$((cursor_pos - 1))}${input:$cursor_pos}"
+                        ((cursor_pos--))
                     fi
-                fi
-                ;;
-        esac
-    done
+                    ;;
+                TIMEOUT)
+                    continue
+                    ;;
+                $KEY_CTRL_C)
+                    result=1
+                    break
+                    ;;
+                *)
+                    # 通常文字
+                    if [[ ${#key} -eq 1 ]] && [[ "$key" =~ [[:print:]] ]]; then
+                        if [[ ${#input} -lt $input_width ]]; then
+                            input="${input:0:$cursor_pos}${key}${input:$cursor_pos}"
+                            ((cursor_pos++))
+                        fi
+                    fi
+                    ;;
+            esac
+        done
+
+        tui_hide_cursor
+        tui_restore_cursor
+        tui_mark_dirty
+        tui_refresh
+
+    } >&2
+
+    if [[ $result -eq 0 ]]; then
+        echo "$final_input"
+        return 0
+    else
+        return 1
+    fi
 }
 
 # =============================================================================
@@ -360,7 +388,7 @@ tui_task_detail_dialog() {
 
     # 入力待ちループ
     while true; do
-        local key=$(tui_get_key)
+        local raw_key=$(tui_get_key); local key="${raw_key%_}"
 
         case "$key" in
             s)
@@ -566,7 +594,7 @@ tui_help_dialog() {
 
     # 入力待ち
     while true; do
-        local key=$(tui_get_key)
+        local raw_key=$(tui_get_key); local key="${raw_key%_}"
         case "$key" in
             $KEY_ESCAPE|q|$KEY_ENTER)
                 break
@@ -575,6 +603,7 @@ tui_help_dialog() {
     done
 
     # ダイアログを閉じる
+    tui_hide_cursor
     tui_restore_cursor
     tui_mark_dirty
     tui_refresh
@@ -614,7 +643,7 @@ tui_error_dialog() {
 
     # 入力待ち
     while true; do
-        local key=$(tui_get_key)
+        local raw_key=$(tui_get_key); local key="${raw_key%_}"
         case "$key" in
             $KEY_ESCAPE|$KEY_ENTER|q)
                 break
@@ -623,6 +652,7 @@ tui_error_dialog() {
     done
 
     # ダイアログを閉じる
+    tui_hide_cursor
     tui_restore_cursor
     tui_mark_dirty
     tui_refresh
@@ -637,103 +667,133 @@ tui_error_dialog() {
 # 戻り値: 選択された項目の値 (標準出力), 終了コード0 (キャンセル時は1)
 tui_selection_dialog() {
     local title="$1"
-    # 配列として受け取るために eval を使うか、IFSで分割する
-    # ここではスペース区切りの文字列を配列に変換する
     local options_str="$2"
     local default_index="${3:-0}"
     local width=${4:-50}
     local height=${5:-10}
 
-    local -a options
-    read -r -a options <<< "$options_str"
-
-    local rows=$(tui_get_rows)
-    local cols=$(tui_get_cols)
-    local dialog_row=$(( (rows - height) / 2 ))
-    local dialog_col=$(( (cols - width) / 2 ))
-
-    # 背景オーバーレイ
-    tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
-
-    # ダイアログボックス
-    tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
-
-    local list_row=$((dialog_row + 2))
-    local list_col=$((dialog_col + 2))
-    local list_width=$((width - 4))
-    local list_height=$((height - 4))
-    local num_options=${#options[@]}
-    local current_index=$default_index
-    local scroll_offset=0
-
-    # スクロール位置の初期調整
-    if [[ $current_index -ge $list_height ]]; then
-        scroll_offset=$((current_index - list_height + 1))
-    fi
-
     local selected_value=""
     local result=1
 
-    while true; do
-        # リスト描画
-        local i=0
-        while [[ $i -lt $list_height ]]; do
-            local opt_idx=$((scroll_offset + i))
-            if [[ $opt_idx -ge $num_options ]]; then
+    # 画画処理をstderrにリダイレクトして、戻り値(stdout)と分離する
+    {
+        # DEBUG
+        echo "[DEBUG] tui_selection_dialog START: title='$title', options='$options_str', default=$default_index, width=$width, height=$height" >> /tmp/claude_dashboard_debug.log
+
+        # オプションを配列に変換（bash 3.2互換）
+        local num_options=0
+        local opt_index=0
+        local opt_value=""
+
+        # IFS を使ってスペース区切りで配列に変換
+        local OLDIFS="$IFS"
+        IFS=' '
+        for opt_value in $options_str; do
+            eval "local OPT_$num_options=\"\$opt_value\""
+            num_options=$((num_options + 1))
+        done
+        IFS="$OLDIFS"
+
+        echo "[DEBUG] tui_selection_dialog: num_options=$num_options" >> /tmp/claude_dashboard_debug.log
+
+        local rows=$(tui_get_rows)
+        local cols=$(tui_get_cols)
+        local dialog_row=$((rows / 2 - height / 2))
+        local dialog_col=$((cols / 2 - width / 2))
+
+        # 背景オーバーレイ
+        tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+
+        # ダイアログボックス
+        tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
+
+        local list_row=$((dialog_row + 2))
+        local list_col=$((dialog_col + 2))
+        local list_width=$((width - 4))
+        local list_height=$((height - 4))
+        local current_index=$default_index
+        local scroll_offset=0
+
+        # スクロール位置の初期調整
+        if [[ $current_index -ge $list_height ]]; then
+            scroll_offset=$((current_index - list_height + 1))
+        fi
+
+        while true; do
+            # リスト描画
+            opt_index=0
+            while [[ $opt_index -lt $list_height ]]; do
+                local item_idx=$((scroll_offset + opt_index))
+                if [[ $item_idx -ge $num_options ]]; then
+                    break
+                fi
+
+                eval "local item_value=\"\$OPT_${item_idx}\""
+                local row=$((list_row + opt_index))
+                tui_move "$row" "$list_col"
+
+                if [[ $item_idx -eq $current_index ]]; then
+                    printf "${REVERSE}%-${list_width}s${NC}" " ${item_value}"
+                else
+                    printf "%-${list_width}s" " ${item_value}"
+                fi
+
+                ((opt_index++))
+            done
+
+            # カーソルを表示
+            tui_move $((list_row + current_index - scroll_offset)) $((list_col + 1))
+            tui_show_cursor
+
+            # 入力待ち（シンプルな実装）
+            local key
+            if ! IFS= read -d '' -rsn1 key 2>/dev/null; then
                 break
             fi
+            [[ -z "$key" ]] && key="TIMEOUT"
 
-            local item="${options[$opt_idx]}"
-            local row=$((list_row + i))
-            
-            tui_move "$row" "$list_col"
-            
-            if [[ $opt_idx -eq $current_index ]]; then
-                printf "${REVERSE}%-${list_width}s${NC}" " ${item}"
-            else
-                printf "%-${list_width}s" " ${item}"
+            if [[ "$key" != "TIMEOUT" ]]; then
+                echo "[DEBUG] tui_selection_dialog: got key='$key', current_index=$current_index" >> /tmp/claude_dashboard_debug.log
             fi
 
-            ((i++))
+            case "$key" in
+                $KEY_UP|k)
+                    if [[ $current_index -gt 0 ]]; then
+                        ((current_index--))
+                        if [[ $current_index -lt $scroll_offset ]]; then
+                            scroll_offset=$current_index
+                        fi
+                    fi
+                    ;;
+                $KEY_DOWN|j)
+                    if [[ $current_index -lt $((num_options - 1)) ]]; then
+                        ((current_index++))
+                        if [[ $current_index -ge $((scroll_offset + list_height)) ]]; then
+                            ((scroll_offset++))
+                        fi
+                    fi
+                    ;;
+                $KEY_ENTER)
+                    eval "selected_value=\"\$OPT_${current_index}\""
+                    result=0
+                    break
+                    ;;
+                $KEY_ESCAPE|q)
+                    result=1
+                    break
+                    ;;
+            esac
         done
 
-        # スクロールバー簡易表示 (必要なら)
-        
-        # 入力待ち
-        local key=$(tui_get_key)
-        case "$key" in
-            $KEY_UP|k)
-                if [[ $current_index -gt 0 ]]; then
-                    ((current_index--))
-                    if [[ $current_index -lt $scroll_offset ]]; then
-                        scroll_offset=$current_index
-                    fi
-                fi
-                ;;
-            $KEY_DOWN|j)
-                if [[ $current_index -lt $((num_options - 1)) ]]; then
-                    ((current_index++))
-                    if [[ $current_index -ge $((scroll_offset + list_height)) ]]; then
-                        ((scroll_offset++))
-                    fi
-                fi
-                ;;
-            $KEY_ENTER)
-                selected_value="${options[$current_index]}"
-                result=0
-                break
-                ;;
-            $KEY_ESCAPE|q)
-                result=1
-                break
-                ;;
-        esac
-    done
+        # ダイアログを閉じる
+        tui_hide_cursor
+        tui_restore_cursor
+        tui_mark_dirty
+        tui_refresh
 
-    # ダイアログを閉じる
-    tui_restore_cursor
-    tui_mark_dirty
-    tui_refresh
+        echo "[DEBUG] tui_selection_dialog END: result=$result, selected_value='$selected_value'" >> /tmp/claude_dashboard_debug.log
+
+    } >&2
 
     if [[ $result -eq 0 ]]; then
         echo "$selected_value"

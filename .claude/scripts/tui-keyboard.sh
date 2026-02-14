@@ -12,6 +12,7 @@
 # 特殊キー
 KEY_ESCAPE=$'\x1b'
 KEY_ENTER=$'\x0a'
+KEY_ENTER_ALT=$'\x0d'
 KEY_TAB=$'\x09'
 KEY_SPACE=$'\x20'
 KEY_BACKSPACE=$'\x7f'
@@ -65,8 +66,16 @@ KEY_CTRL_X=$'\x18'
 _tui_read_char() {
     local timeout="${1:-0.1}"
     local char
-    IFS= read -rsn1 -t "$timeout" char
-    echo "$char"
+    if IFS= read -rsn1 -d '' -t "$timeout" char; then
+        printf "%s_" "$char"
+    else
+        local status=$?
+        if [[ $status -gt 128 ]]; then
+            : # Timeout
+        else
+            printf "EOF_"
+        fi
+    fi
 }
 
 # エスケープシーケンスを読み取る
@@ -75,17 +84,26 @@ _tui_read_escape_sequence() {
     local char
 
     # 次の文字を読み取り
-    IFS= read -rsn1 -t 0.1 char || { echo "$seq"; return; }
+    IFS= read -rsn1 -d '' -t 0.1 char || { echo "$seq"; return; }
 
     if [[ "$char" == "[" ]]; then
         seq="${seq}["
         # パラメータと終了文字を読み取り
-        IFS= read -rsn2 -t 0.1 char || { echo "$seq"; return; }
-        seq="${seq}${char}"
+        # 数字の場合はさらに読み進める（~で終わるまで）
+        # アルファベットの場合はそこで終了
+        
+        while true; do
+            IFS= read -rsn1 -t 0.1 char || break
+            seq="${seq}${char}"
+            
+            if [[ "$char" =~ [a-zA-Z~] ]]; then
+                break
+            fi
+        done
     elif [[ "$char" == "O" ]]; then
         seq="${seq}O"
         # Function key
-        IFS= read -rsn1 -t 0.1 char || { echo "$seq"; return; }
+        IFS= read -rsn1 -d '' -t 0.1 char || { echo "$seq"; return; }
         seq="${seq}${char}"
     else
         # ALTキー + 文字
@@ -97,22 +115,38 @@ _tui_read_escape_sequence() {
 
 # キー入力を取得（メイン関数）
 tui_get_key() {
-    local char
-    char=$(_tui_read_char 1)
-
+    local raw
+    raw=$(_tui_read_char 1)
+    local char="${raw%_}"
+    
+    local result
     if [[ -z "$char" ]]; then
-        # タイムアウト（auto-update用）
-        echo "TIMEOUT"
-        return
-    fi
-
-    if [[ "$char" == $'\x1b' ]]; then
+        if [[ "$raw" == "EOF_" ]]; then
+            result="EOF"
+        else
+            result="TIMEOUT"
+        fi
+    elif [[ "$char" == $'\x1b' ]]; then
         # エスケープシーケンス
-        _tui_read_escape_sequence
+        result=$(_tui_read_escape_sequence)
+    elif [[ "$char" == $'\x0d' || "$char" == $'\x0a' ]]; then
+        # Enterキー (CR/LFを正規化)
+        result="$KEY_ENTER"
     else
         # 通常文字
-        echo "$char"
+        result="$char"
     fi
+
+    # 末尾にアンダースコアを付与して、コマンド置換による改行削除を防ぐ
+    # 呼び出し側で ${key%_} として除去する必要がある
+    printf "%s_" "$result"
+}
+
+# 入力バッファをフラッシュ
+tui_flush_input() {
+    local dummy
+    # バッファが空になるまで読み捨てる（0.01秒タイムアウトで高速化）
+    while IFS= read -rsn1 -t 0.01 dummy 2>/dev/null; do :; done
 }
 
 # =============================================================================
