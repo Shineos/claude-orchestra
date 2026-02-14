@@ -144,6 +144,12 @@ if [[ ! -f "$CLAUDE_DIR/tasks.json" ]]; then
     fi
 fi
 
+# 8. approvals.json 初期化
+if [[ ! -f "$CLAUDE_DIR/approvals.json" ]]; then
+    echo '{"approvals": [], "last_id": 0}' > "$CLAUDE_DIR/approvals.json"
+    printf "%b" "${GREEN}✓ approvals.json を初期化しました${NC}\n"
+fi
+
 echo ""
 printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 printf "%b" "${GREEN}  インストール完了！${NC}\n"

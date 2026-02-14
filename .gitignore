@@ -17,3 +17,5 @@ spec/
 .claude/pids/
 .claude/tasks/
 .claude/tasks.json
+
+.claude/approvals.json

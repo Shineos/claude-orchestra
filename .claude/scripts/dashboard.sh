@@ -391,46 +391,7 @@ read_key() {
 # 入力プロンプト
 prompt_input() {
     local prompt="$1"
-    local height=$(get_terminal_height)
-
-    # 画面下部に移動（tputを使わずANSIシーケンスで直接実行）
-    # サブシェル内ではtputが不安定なため、printfでエスケープシーケンスを出力
-    printf "\033[%d;0H" "$((height - 1))" >&2  # tput cup $((height - 1)) 0
-    printf "\033[2K" >&2  # tput el (行をクリア)
-    printf "%b" "${BOLD}${COLOR_PRIMARY}❯ ${prompt}: ${NC}" >&2
-
-    # 入力用の端末設定（標準入力モード）
-    # 注意: TUIモードから一旦離脱して入力を受付
-    # tput cnorm >&2  # コマンド置換内ではtputが不安定なため削除
-
-    # stty設定を保存してから通常モードに切替
-    local old_settings=$(stty -g 2>/dev/null)
-    stty echo icanon >&2
-
-    # read で入力を取得（read -e はrawモードで不安定なため、read -rを使用）
-    local input
-    IFS= read -r input
-    local read_status=$?
-
-    # TUIモードに復帰
-    stty "$old_settings" 2>/dev/null || true
-    setup_terminal >&2  # Output to stderr to avoid capturing in command substitution
-
-    # 入力文字列をクリーニング（制御文字とANSIエスケープシーケンスを削除）
-    # ANSIエスケープシーケンス (\x1b[ または \033[ で始まるシーケンス) を削除
-    # 例: ^[[?25l (DECSTR), ^[[A (CUU), ^[[2K (EL), など
-    local cleaned=$(echo "$input" | sed -E 's/\x1b\[[0-9;:*[a-zA-Z]//g; s/\x1b\?.?//g; s/\x1b.//g; s/\r//g; s/^[[:space:]]+//; s/[[:space:]]+$//')
-
-    # DEBUG LOG (Removed)
-    # echo "[DEBUG] prompt_input: raw='$input', cleaned='$cleaned', status=$read_status" >> /tmp/claude_dashboard_debug.log
-
-    # 入力後の改行の影響を除去（tputを避けてprintfで直接実行）
-    printf "\033[A" >&2  # cuu1: カーソルを1行上へ
-    printf "\033[2K" >&2  # el: 行をクリア
-
-    # トリムして返す
-    printf "%s\n" "$cleaned"
-    return 0
+    prompt_edit_bottom "$prompt" ""
 }
 
 # 編集用プロンプト（デフォルト値あり、画面下部）
@@ -599,6 +560,7 @@ add_task_interactive() {
     local task_desc
     if ! task_desc=$(prompt_input "タスク説明を入力"); then
         # echo "[ERROR] prompt_input failed with exit code $?" >> /tmp/claude_dashboard_debug.log
+        draw_dashboard
         return 1
     fi
     
