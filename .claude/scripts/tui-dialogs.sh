@@ -79,7 +79,7 @@ tui_confirm_dialog() {
     echo "$message" | while IFS= read -r line; do
         tui_move "$message_row" "$current_col"
         local truncated=$(tui_truncate "$line" "$max_width")
-        printf "${COLOR_WARNING}${truncated}${NC}"
+        printf "%s" "${COLOR_WARNING}${truncated}${NC}"
         ((message_row++))
     done
 
@@ -187,7 +187,7 @@ tui_input_dialog() {
                 printf "%s" "$masked"
             else
                 # 通常モード
-                printf "${input}"
+                printf "%s" "${input}"
             fi
 
             # 残りをスペースで埋める
@@ -711,6 +711,7 @@ tui_selection_dialog() {
         local list_col=$((dialog_col + 2))
         local list_width=$((width - 4))
         local list_height=$((height - 4))
+        local list_width_inner=$((list_width - 2))
         local current_index=$default_index
         local scroll_offset=0
 
@@ -724,20 +725,20 @@ tui_selection_dialog() {
             opt_index=0
             while [[ $opt_index -lt $list_height ]]; do
                 local item_idx=$((scroll_offset + opt_index))
-                if [[ $item_idx -ge $num_options ]]; then
-                    break
-                fi
-
-                eval "local item_value=\"\$OPT_${item_idx}\""
                 local row=$((list_row + opt_index))
                 tui_move "$row" "$list_col"
 
-                if [[ $item_idx -eq $current_index ]]; then
-                    printf "${REVERSE}%-${list_width}s${NC}" " ${item_value}"
+                if [[ $item_idx -ge $num_options ]]; then
+                    # 空白で埋める
+                    printf "%${list_width}s" ""
                 else
-                    printf "%-${list_width}s" " ${item_value}"
+                    eval "local item_value=\"\$OPT_${item_idx}\""
+                    if [[ $item_idx -eq $current_index ]]; then
+                        printf "${REVERSE} %-${list_width_inner}s ${NC}" "${item_value}"
+                    else
+                        printf " %-${list_width_inner}s " "${item_value}"
+                    fi
                 fi
-
                 ((opt_index++))
             done
 
@@ -745,16 +746,9 @@ tui_selection_dialog() {
             tui_move $((list_row + current_index - scroll_offset)) $((list_col + 1))
             tui_show_cursor
 
-            # 入力待ち（シンプルな実装）
-            local key
-            if ! IFS= read -d '' -rsn1 key 2>/dev/null; then
-                break
-            fi
-            [[ -z "$key" ]] && key="TIMEOUT"
-
-            if [[ "$key" != "TIMEOUT" ]]; then
-                echo "[DEBUG] tui_selection_dialog: got key='$key', current_index=$current_index" >> /tmp/claude_dashboard_debug.log
-            fi
+            # 入力待ち（共通関数を使用）
+            local raw_key=$(tui_get_key)
+            local key="${raw_key%_}"
 
             case "$key" in
                 $KEY_UP|k)
@@ -773,7 +767,7 @@ tui_selection_dialog() {
                         fi
                     fi
                     ;;
-                $KEY_ENTER)
+                $KEY_ENTER )
                     eval "selected_value=\"\$OPT_${current_index}\""
                     result=0
                     break
@@ -781,6 +775,9 @@ tui_selection_dialog() {
                 $KEY_ESCAPE|q)
                     result=1
                     break
+                    ;;
+                TIMEOUT)
+                    continue
                     ;;
             esac
         done

@@ -651,7 +651,7 @@ start_task_interactive() {
     fi
     
     local task_id
-    if ! task_id=$(prompt_select_horizontal "開始対象" "$ids"); then
+    if ! task_id=$(prompt_input "開始対象タスクID (例: 1)"); then
         draw_dashboard
         return
     fi
@@ -683,7 +683,7 @@ complete_task_interactive() {
     fi
     
     local task_id
-    if ! task_id=$(prompt_select_horizontal "完了対象" "$ids"); then
+    if ! task_id=$(prompt_input "完了対象タスクID"); then
         draw_dashboard
         return
     fi
@@ -712,7 +712,7 @@ edit_task_interactive() {
     fi
     
     local task_id
-    if ! task_id=$(prompt_select_horizontal "編集対象" "$ids"); then
+    if ! task_id=$(prompt_input "編集対象タスクID"); then
         draw_dashboard
         return
     fi
@@ -764,7 +764,7 @@ delete_task_interactive() {
     fi
     
     local task_id
-    if ! task_id=$(prompt_select_horizontal "削除対象" "$ids"); then
+    if ! task_id=$(prompt_input "削除対象タスクID"); then
         draw_dashboard
         return
     fi
@@ -793,7 +793,7 @@ show_task_detail() {
     fi
     
     local task_id
-    if ! task_id=$(prompt_select_horizontal "詳細表示対象" "$ids"); then
+    if ! task_id=$(prompt_input "表示対象ID (v)"); then
         draw_dashboard
         return
     fi
@@ -927,7 +927,7 @@ show_logs_interactive() {
     fi
     
     local task_id
-    if ! task_id=$(prompt_select_horizontal "ログ表示対象" "$ids"); then
+    if ! task_id=$(prompt_input "ログ表示対象ID (l)"); then
         draw_dashboard
         return
     fi
