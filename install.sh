@@ -150,6 +150,60 @@ if [[ ! -f "$CLAUDE_DIR/approvals.json" ]]; then
     printf "%b" "${GREEN}✓ approvals.json を初期化しました${NC}\n"
 fi
 
+# 9. control-center バイナリ
+mkdir -p "$CLAUDE_DIR/bin"
+
+# OS/Arch 検出
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+BINARY_NAME=""
+
+case "$OS" in
+    Darwin)
+        if [[ "$ARCH" == "arm64" ]]; then
+            BINARY_NAME="control-center-darwin-arm64"
+        else
+            BINARY_NAME="control-center-darwin-amd64"
+        fi
+        ;;
+    Linux)
+        if [[ "$ARCH" == "x86_64" ]]; then
+            BINARY_NAME="control-center-linux-amd64"
+        else
+            # Fallback or error
+            printf "%b" "${YELLOW}⚠ 未サポートのアーキテクチャ: $OS/$ARCH${NC}\n"
+        fi
+        ;;
+    *)
+        printf "%b" "${YELLOW}⚠ 未サポートのOS: $OS${NC}\n"
+        ;;
+esac
+
+INSTALLED=false
+if [[ -n "$BINARY_NAME" ]]; then
+    # bin/ ディレクトリにあるかチェック（package.sh構成）
+    if [[ -f "$TEMPLATE_DIR/bin/$BINARY_NAME" ]]; then
+        cp "$TEMPLATE_DIR/bin/$BINARY_NAME" "$CLAUDE_DIR/bin/control-center"
+        INSTALLED=true
+    # ルートにあるかチェック（開発環境/旧構成）
+    elif [[ -f "$TEMPLATE_DIR/$BINARY_NAME" ]]; then
+        cp "$TEMPLATE_DIR/$BINARY_NAME" "$CLAUDE_DIR/bin/control-center"
+        INSTALLED=true
+    # control-center そのものがあるかチェック（手動ビルド）
+    elif [[ -f "$TEMPLATE_DIR/control-center" ]]; then
+        cp "$TEMPLATE_DIR/control-center" "$CLAUDE_DIR/bin/"
+        INSTALLED=true
+    fi
+fi
+
+if [[ "$INSTALLED" == "true" ]]; then
+    chmod +x "$CLAUDE_DIR/bin/control-center"
+    printf "%b" "${GREEN}✓ control-center バイナリをインストールしました ($BINARY_NAME)${NC}\n"
+else
+    printf "%b" "${YELLOW}⚠ control-center バイナリが見つかりません (make buildを実行してください)${NC}\n"
+    printf "%b" "${YELLOW}  期待されるバイナリ名: $BINARY_NAME${NC}\n"
+fi
+
 echo ""
 printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 printf "%b" "${GREEN}  インストール完了！${NC}\n"

@@ -138,6 +138,8 @@ tui_input_dialog() {
     local width=${4:-50}
     local height=${5:-6}
     local password="${6:-false}"
+    # 位置モード: "center" (中央) または "bottom" (下部)
+    local position_mode="${7:-center}"
 
     local final_input=""
     local result=1
@@ -146,11 +148,23 @@ tui_input_dialog() {
     {
         local rows=$(tui_get_rows)
         local cols=$(tui_get_cols)
-        local dialog_row=$(( (rows - height) / 2 ))
-        local dialog_col=$(( (cols - width) / 2 ))
+        local dialog_row
+        local dialog_col
 
-        # 背景を暗くする
-        tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+        if [[ "$position_mode" == "bottom" ]]; then
+            # 画面下部に配置
+            dialog_row=$((rows - height - 1))
+            dialog_col=$(( (cols - width) / 2 ))
+        else
+            # 中央に配置（デフォルト）
+            dialog_row=$(( (rows - height) / 2 ))
+            dialog_col=$(( (cols - width) / 2 ))
+        fi
+
+        # 背景を暗くする（bottomモードではスキップ）
+        if [[ "$position_mode" != "bottom" ]]; then
+            tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+        fi
 
         # ダイアログボックス
         tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
@@ -196,7 +210,7 @@ tui_input_dialog() {
 
             # カーソル位置
             tui_move "$input_row" $((input_col + cursor_pos + 2))
-            tui_show_cursor
+            tui_show_cursor_steady
 
             local key
             local raw_key
@@ -404,8 +418,8 @@ tui_task_detail_dialog() {
                 return 0
                 ;;
             f)
-                # Fail task
-                local reason=$(tui_input_dialog "Fail Task" "Reason:" "" 40 5)
+                # Fail task - use bottom positioning
+                local reason=$(tui_input_dialog "Fail Task" "Reason:" "" 40 5 false "bottom")
                 if [[ $? -eq 0 ]]; then
                     tui_close_dialog
                     echo "fail:$reason"
@@ -413,30 +427,30 @@ tui_task_detail_dialog() {
                 fi
                 ;;
             e)
-                # Edit task properties
+                # Edit task properties - use bottom positioning for dialogs
                 local edit_opts="Description Agent Priority Notes"
-                local target=$(tui_selection_dialog "Edit Property" "$edit_opts" 0 40 10)
-                
+                local target=$(tui_selection_dialog "Edit Property" "$edit_opts" 0 40 10 "bottom")
+
                 if [[ $? -eq 0 && -n "$target" ]]; then
                     local new_val=""
                     local field=""
                     case "$target" in
                         "Description")
-                            new_val=$(tui_input_dialog "Edit Description" "Value:" "$description" 50 8)
+                            new_val=$(tui_input_dialog "Edit Description" "Value:" "$description" 50 8 false "bottom")
                             field="description"
                             ;;
                         "Agent")
                             local agents="frontend backend tests docs planner architect coder reviewer tester"
-                            new_val=$(tui_selection_dialog "Select Agent" "$agents" 0 40 12)
+                            new_val=$(tui_selection_dialog "Select Agent" "$agents" 0 40 12 "bottom")
                             field="agent"
                             ;;
                         "Priority")
                             local priorities="critical high normal low"
-                            new_val=$(tui_selection_dialog "Select Priority" "$priorities" 2 40 10)
+                            new_val=$(tui_selection_dialog "Select Priority" "$priorities" 2 40 10 "bottom")
                             field="priority"
                             ;;
                         "Notes")
-                            new_val=$(tui_input_dialog "Add Note" "Note:" "" 50 8)
+                            new_val=$(tui_input_dialog "Add Note" "Note:" "" 50 8 false "bottom")
                             if [[ $? -eq 0 && -n "$new_val" ]]; then
                                 # ノートは配列に追加するため特殊扱い
                                 # 簡易的に orchestrator add-note コマンドを呼ぶか、呼び出し元に任せる
@@ -448,7 +462,7 @@ tui_task_detail_dialog() {
                             continue
                             ;;
                     esac
-                    
+
                     if [[ -n "$new_val" && -n "$field" ]]; then
                         tui_close_dialog
                         echo "edit:$field:$new_val"
@@ -663,7 +677,7 @@ tui_error_dialog() {
 # =============================================================================
 
 # 選択ダイアログを表示
-# 引数: タイトル, 選択肢配列(スペース区切り文字列), デフォルトインデックス(0-based), 幅, 高さ
+# 引数: タイトル, 選択肢配列(スペース区切り文字列), デフォルトインデックス(0-based), 幅, 高さ, 位置モード("center"|"bottom")
 # 戻り値: 選択された項目の値 (標準出力), 終了コード0 (キャンセル時は1)
 tui_selection_dialog() {
     local title="$1"
@@ -671,6 +685,7 @@ tui_selection_dialog() {
     local default_index="${3:-0}"
     local width=${4:-50}
     local height=${5:-10}
+    local position_mode="${6:-center}"
 
     local selected_value=""
     local result=1
@@ -698,11 +713,23 @@ tui_selection_dialog() {
 
         local rows=$(tui_get_rows)
         local cols=$(tui_get_cols)
-        local dialog_row=$((rows / 2 - height / 2))
-        local dialog_col=$((cols / 2 - width / 2))
+        local dialog_row
+        local dialog_col
 
-        # 背景オーバーレイ
-        tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+        if [[ "$position_mode" == "bottom" ]]; then
+            # 画面下部に配置
+            dialog_row=$((rows - height - 1))
+            dialog_col=$(( (cols - width) / 2 ))
+        else
+            # 中央に配置（デフォルト）
+            dialog_row=$((rows / 2 - height / 2))
+            dialog_col=$((cols / 2 - width / 2 ))
+        fi
+
+        # 背景オーバーレイ（bottomモードではスキップ）
+        if [[ "$position_mode" != "bottom" ]]; then
+            tui_draw_overlay "$dialog_row" "$dialog_col" "$width" "$height"
+        fi
 
         # ダイアログボックス
         tui_box "$dialog_row" "$dialog_col" "$width" "$height" "$title" "$COLOR_PRIMARY"
@@ -742,9 +769,9 @@ tui_selection_dialog() {
                 ((opt_index++))
             done
 
-            # カーソルを表示
+            # カーソルを表示（点滅なし）
             tui_move $((list_row + current_index - scroll_offset)) $((list_col + 1))
-            tui_show_cursor
+            tui_show_cursor_steady
 
             # 入力待ち（共通関数を使用）
             local raw_key=$(tui_get_key)

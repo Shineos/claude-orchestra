@@ -90,6 +90,21 @@ tui_show_cursor() {
     tput cnorm
 }
 
+# カーソルを表示（点滅なし・安定）
+tui_show_cursor_steady() {
+    # DECSCUSR: Set Cursor Style
+    # 1 = blinking block, 2 = steady block
+    # 3 = blinking underline, 4 = steady underline
+    # 5 = blinking bar, 6 = steady bar
+    printf '\033[6 q'  # Steady bar cursor (non-blinking)
+}
+
+# カーソルを表示（点滅あり・デフォルト）
+tui_show_cursor_blinking() {
+    printf '\033[5 q'  # Blinking bar cursor
+    # tput cnorm  # Restore terminal default
+}
+
 # 画面サイズを取得
 tui_get_size() {
     echo "$(tput lines 2>/dev/null | tr -d '[:space:]') $(tput cols 2>/dev/null | tr -d '[:space:]')"
@@ -536,6 +551,8 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
     export -f tui_move
     export -f tui_hide_cursor
     export -f tui_show_cursor
+    export -f tui_show_cursor_steady
+    export -f tui_show_cursor_blinking
     export -f tui_get_size
     export -f tui_get_rows
     export -f tui_get_cols

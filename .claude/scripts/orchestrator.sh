@@ -114,6 +114,53 @@ fi
 # 初期化関数
 # ==============================================================================
 
+# Staleタスクのクリーンアップ（放置されたin_progressタスクをpendingに戻す）
+cleanup_stale_tasks() {
+    local stale_threshold_hours="${STALE_THRESHOLD_HOURS:-1}"
+    local stale_threshold_seconds=$((stale_threshold_hours * 3600))
+    local current_time=$(date +%s)
+    local cleaned_count=0
+
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        return 0
+    fi
+
+    # in_progressタスクをチェック
+    local stale_tasks=$(jq -r --argjson current_time "$current_time" --argjson threshold "$stale_threshold_seconds" '
+        .tasks
+        | to_entries
+        | map(select(.value.status == "in_progress" and .value.started_at != null))
+        | map(select(($current_time - (.value.started_at | fromdateiso8601)) > $threshold))
+        | from_entries
+        | keys[]
+    ' "$TASKS_FILE" 2>/dev/null || echo "")
+
+    if [[ -n "$stale_tasks" ]]; then
+        for idx in $stale_tasks; do
+            local task_id=$(jq -r ".tasks[$idx].id" "$TASKS_FILE")
+            orch_log "WARN" "Stale task detected: #$task_id (resetting to pending)"
+            ((cleaned_count++))
+        done
+
+        # 一括でステータスを更新
+        local updated_tasks=$(jq --argjson current_time "$current_time" --argjson threshold "$stale_threshold_seconds" '
+            .tasks |= map(
+                if .status == "in_progress" and .started_at != null and (($current_time - (.started_at | fromdateiso8601)) > $threshold) then
+                    .status = "pending" | .started_at = null | .notes += [{"text": "Auto-recovered from stale state", "timestamp": (now | todateiso8601)}]
+                else
+                    .
+                end
+            )
+        ' "$TASKS_FILE")
+
+        echo "$updated_tasks" > "$TASKS_FILE"
+
+        if [[ $cleaned_count -gt 0 ]]; then
+            orch_log "INFO" "Cleaned up $cleaned_count stale task(s)"
+        fi
+    fi
+}
+
 # 初期化関数
 init_tasks() {
     mkdir -p "$TASKS_DIR"
@@ -122,6 +169,8 @@ init_tasks() {
     fi
     # ログローテーション実行
     orch_rotate_logs
+    # Staleタスクのクリーンアップ
+    cleanup_stale_tasks
 }
 
 # タスクID生成
@@ -1671,6 +1720,35 @@ add_task() {
     return 0
 }
 
+remove_task_by_id() {
+    local task_id=$1
+
+    # タスク情報を取得 (存在確認)
+    local task=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE")
+    if [[ -z "$task" || "$task" == "null" ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] が見つかりませんでした${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(echo "$task" | jq -r '.description')
+
+    # ロックを取得
+    if ! acquire_lock; then
+        printf "%b" "${RED}エラー: タスク削除失敗（ロック取得失敗）${NC}\n"
+        return 1
+    fi
+
+    # タスクを削除
+    jq --argjson id "$task_id" \
+       'del(.tasks[] | select(.id == $id))' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    release_lock
+
+    printf "%b" "${GREEN}✓ タスクを削除しました [ID: $task_id]${NC}\n"
+    printf "%b" "  ${CYAN}説明:${NC} $task_desc\n"
+}
+
 start_task() {
     local task_id=$1
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -1818,6 +1896,162 @@ reset_task() {
        "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] をpendingにリセットしました: $task_desc${NC}\n"
+}
+
+# タスクリトライ（失敗したタスクを再実行可能にする）
+retry_task() {
+    local task_id=$1
+    local max_retries="${2:-3}"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # タスク情報を取得
+    local task_info=$(jq --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$task_info" ]]; then
+        printf "%b" "${RED}エラー: タスクID $task_id が見つかりません${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(jq -r '.description' <<< "$task_info")
+    local task_status=$(jq -r '.status' <<< "$task_info")
+    local task_agent=$(jq -r '.agent' <<< "$task_info")
+    local current_retries=$(jq -r '.retries // 0' <<< "$task_info")
+
+    # 失敗またはタイムアウトしたタスクのみリトライ可能
+    if [[ "$task_status" != "failed" ]]; then
+        printf "%b" "${YELLOW}注意: タスク [ID: $task_id] はfailed状態ではありません（現在: $task_status）${NC}\n"
+        printf "%b" "${CYAN}リセットするには: orch reset $task_id${NC}\n"
+        return 1
+    fi
+
+    # 最大リトライ回数チェック
+    if [[ $current_retries -ge $max_retries ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] は最大リトライ回数($max_retries)に達しました${NC}\n"
+        printf "%b" "${CYAN}強制的にリトライするには: orch reset $task_id && orch start $task_id${NC}\n"
+        return 1
+    fi
+
+    local new_retries=$((current_retries + 1))
+
+    # ログ記録
+    orch_log "INFO" "タスクリトライ: [#$task_id] $task_desc (試行 $new_retries/$max_retries)"
+
+    # タスクをpendingに戻してリトライ回数をインクリメント
+    jq --argjson id "$task_id" \
+       --argjson retries "$new_retries" \
+       --arg timestamp "$timestamp" \
+       '.tasks |= map(if .id == $id then
+           .status = "pending" |
+           .started_at = null |
+           .completed_at = null |
+           .result = null |
+           .retries = $retries |
+           .updated_at = $timestamp |
+           .notes += [{"type": "retry", "text": "リトライ試行 \($retries)", "timestamp": $timestamp}]
+       else . end)' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    printf "%b" "${GREEN}✓ タスク [ID: $task_id] をリトライ可能にしました (試行 $new_retries/$max_retries)${NC}\n"
+    printf "%b" "${CYAN}  実行するには: orch start $task_id${NC}\n"
+}
+
+# 全失敗タスクを一括リトライ
+retry_all_failed() {
+    local max_retries="${1:-3}"
+    local failed_tasks=$(jq -r '[.tasks[] | select(.status == "failed") | .id] | @sh' "$TASKS_FILE" 2>/dev/null | tr -d "'")
+
+    if [[ -z "$failed_tasks" ]]; then
+        printf "%b" "${YELLOW}失敗したタスクはありません${NC}\n"
+        return 0
+    fi
+
+    printf "%b" "${CYAN}失敗したタスクをリトライ可能にします...${NC}\n"
+    echo ""
+
+    local success_count=0
+    local skip_count=0
+
+    for task_id in $failed_tasks; do
+        if retry_task "$task_id" "$max_retries" 2>/dev/null; then
+            ((success_count++))
+        else
+            ((skip_count++))
+        fi
+    done
+
+    echo ""
+    printf "%b" "${GREEN}✓ $success_count 件のタスクをリトライ可能にしました${NC}\n"
+    if [[ $skip_count -gt 0 ]]; then
+        printf "%b" "${YELLOW}  $skip_count 件は最大リトライ回数に達しました${NC}\n"
+    fi
+}
+
+# 並列エージェント実行
+parallel_agents() {
+    local agents=("$@")
+    local valid_agents=("frontend" "backend" "tests" "docs" "architect" "reviewer")
+    local launched_agents=()
+    local log_dir="$CLAUDE_DIR/logs"
+    mkdir -p "$log_dir"
+
+    if [[ ${#agents[@]} -eq 0 ]]; then
+        printf "%b" "${RED}エラー: エージェントを指定してください${NC}\n"
+        echo "使用方法: $0 parallel <agent1> <agent2> ..."
+        echo ""
+        echo "例:"
+        echo "  $0 parallel frontend backend    # FrontendとBackendを並列実行"
+        echo "  $0 parallel all                  # 全エージェントを並列実行"
+        echo ""
+        echo "利用可能なエージェント: ${valid_agents[*]}"
+        return 1
+    fi
+
+    # "all"が指定された場合は全エージェントを起動
+    if [[ "$1" == "all" ]]; then
+        agents=("${valid_agents[@]}")
+    fi
+
+    # エージェントの検証
+    for agent in "${agents[@]}"; do
+        if [[ ! " ${valid_agents[*]} " =~ " ${agent} " ]]; then
+            printf "%b" "${YELLOW}警告: 不明なエージェント '$agent' をスキップします${NC}\n"
+            continue
+        fi
+        launched_agents+=("$agent")
+    done
+
+    if [[ ${#launched_agents[@]} -eq 0 ]]; then
+        printf "%b" "${RED}エラー: 有効なエージェントが指定されていません${NC}\n"
+        return 1
+    fi
+
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${CYAN}  並列エージェント起動${NC}\n"
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo ""
+
+    # 各エージェントをバックグラウンドで起動
+    for agent in "${launched_agents[@]}"; do
+        local log_file="$log_dir/parallel-${agent}-$(date +%Y%m%d-%H%M%S).log"
+        printf "%b" "${GREEN}🚀 起動中: ${agent}${NC} (ログ: $log_file)\n"
+
+        # バックグラウンドでエージェントを起動
+        nohup bash "$AGENT_SCRIPT" "$agent" watch > "$log_file" 2>&1 &
+        local pid=$!
+
+        # PIDファイルを作成
+        echo "$pid" > "$CLAUDE_DIR/pids/${agent}.pid"
+        echo "{\"started_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\", \"pid\": $pid, \"mode\": \"parallel\"}" > "$CLAUDE_DIR/pids/${agent}.json"
+
+        orch_log "INFO" "並列起動: $agent (PID: $pid)"
+    done
+
+    echo ""
+    printf "%b" "${GREEN}✓ ${#launched_agents[@]} 個のエージェントを並列起動しました${NC}\n"
+    echo ""
+    printf "%b" "${CYAN}ステータス確認: $0 status${NC}\n"
+    printf "%b" "${CYAN}全停止: $0 stop all${NC}\n"
+    printf "%b" "${CYAN}エージェント一覧: $0 agents${NC}\n"
 }
 
 # タスク状況表示
@@ -3087,6 +3321,24 @@ case "${1:-}" in
 
         if [[ "$2" == "all" ]]; then
             stop_all_agents
+        elif [[ "$2" =~ ^[0-9]+$ ]]; then
+            # タスクIDが指定された場合、そのタスクのエージェントを特定して停止
+            task_id="$2"
+            agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE")
+            
+            if [[ -n "$agent" && "$agent" != "null" ]]; then
+                stop_agent "$agent"
+                
+                # タスクの状態をstoppedに更新
+                jq --argjson id "$task_id" --arg date "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+                   '(.tasks[] | select(.id == $id)) |= (.status = "stopped" | .updated_at = $date)' \
+                   "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+                
+                printf "%b" "${GREEN}✓ タスク #$task_id (エージェント: $agent) を停止しました${NC}\n"
+            else
+                printf "%b" "${RED}エラー: タスクID #$task_id が見つからないか、エージェントが割り当てられていません${NC}\n"
+                return 1
+            fi
         else
             stop_agent "$2"
         fi
@@ -3131,6 +3383,32 @@ case "${1:-}" in
             reset_orchestrator "$keep_logs"
         fi
         ;;
+    retry)
+        # タスクリトライ
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 retry <task_id|all> [max_retries]"
+            echo ""
+            echo "例:"
+            echo "  $0 retry 5        # タスク#5をリトライ（最大3回）"
+            echo "  $0 retry 5 5      # タスク#5をリトライ（最大5回）"
+            echo "  $0 retry all      # 全失敗タスクをリトライ"
+            exit 1
+        fi
+
+        max_retries="${3:-3}"
+
+        if [[ "$2" == "all" ]]; then
+            retry_all_failed "$max_retries"
+        else
+            retry_task "$2" "$max_retries"
+        fi
+        ;;
+    parallel)
+        # 並列エージェント実行
+        shift  # "parallel"をスキップ
+        parallel_agents "$@"
+        ;;
     remove)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: エージェント名を指定してください${NC}\n"
@@ -3153,12 +3431,21 @@ case "${1:-}" in
             load_from_json
         fi
         ;;
+    remove-task|delete-task)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 remove-task <task_id>"
+            exit 1
+        fi
+        remove_task_by_id "$2"
+        ;;
     add)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: タスク説明を指定してください${NC}\n"
             echo "使用方法: $0 add <task> [agent] [priority] [worktree]"
             exit 1
         fi
+
 
         # worktreeオプションをチェック
         _use_worktree="false"
@@ -3630,18 +3917,17 @@ case "${1:-}" in
         printf "%b" "${GREEN}✓ レビュータスクを作成しました: #$_review_id${NC}\n"
         ;;
     dashboard)
-        # TUI Dashboard - メインダッシュボードを表示
-        # ユーザー要望により dashboard.sh を使用
-        _tui_script="$SCRIPT_DIR/dashboard.sh"
+        # Dashboard - Go App
+        _bin="$SCRIPT_DIR/../bin/control-center"
         
-        if [[ ! -f "$_tui_script" ]]; then
-            printf "%b" "${RED}エラー: Dashboard スクリプトが見つかりません: $_tui_script${NC}\n"
+        if [[ ! -x "$_bin" ]]; then
+            printf "%b" "${RED}エラー: control-center バイナリが見つかりません: $_bin${NC}\n"
             exit 1
         fi
 
         # 引数をそのまま渡す (例: --watch)
         shift # "dashboard" を削除
-        bash "$_tui_script" "$@"
+        "$_bin" "$@"
         ;;
     board|taskboard)
         # TUI Task Board - インタラクティブTUIと同じ（Kanban）を使用

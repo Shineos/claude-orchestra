@@ -39,7 +39,9 @@ mkdir -p "$LOGS_DIR"
 
 # Claude CLI タイムアウト設定（秒）
 # タスク実行の最大待機時間。超過した場合はタイムアウトとして失敗します
-CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"  # デフォルト10分
+# 環境変数で上書き可能、デフォルトは動的タイムアウトを使用
+BASE_TIMEOUT="${BASE_TIMEOUT:-600}"  # ベースタイムアウト（10分）
+CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-}"  # 空なら動的タイムアウト使用
 
 # PIDファイルディレクトリ
 PIDS_DIR="$SCRIPT_DIR/pids"
@@ -63,20 +65,27 @@ log() {
     shift
     local message="$*"
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    # stdoutのみに出力（orchestratorがログファイルへのリダイレクトを担当）
-    # 直接実行時も出力が表示されるため、teeは使用しない
-    echo "[$timestamp] [$level] $message"
+    local log_entry="[$timestamp] [$level] $message"
+    
+    # stdoutに出力
+    echo "$log_entry"
+    
+    # ログファイルにも追記
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        echo "$log_entry" >> "$LOG_FILE"
+    fi
 }
 
 # ==============================================================================
 # タスク管理関数
 # ==============================================================================
 
-# エージェントの次のタスクを取得
+# エージェントの次のタスクを取得（優先度順）
 get_next_task() {
     local agent="$1"
     if [[ -f "$TASKS_FILE" ]]; then
         # 依存関係が満たされた未着手タスクを取得
+        # 優先度順でソート: critical(0) > high(1) > normal(2) > low(3)
         local result=$(jq -r --arg agent "$agent" '
             .tasks as $all_tasks
             | .tasks
@@ -86,7 +95,10 @@ get_next_task() {
                 (.dependencies | length) == 0 or
                 (.dependencies | map(. as $dep_id | $all_tasks[] | select(.id == $dep_id) | .status == "completed") | all)
             ))
-            | sort_by(.created_at)
+            | sort_by(
+                (if .priority == "critical" then 0 elif .priority == "high" then 1 elif .priority == "normal" then 2 else 3 end),
+                .created_at
+            )
             | .[0]
             | select(. != null)
             | "\(.id)\t\(.description)\t\(.priority // "normal")"
@@ -156,6 +168,69 @@ load_agent() {
 }
 
 # ==============================================================================
+# 動的タイムアウト計算
+# ==============================================================================
+
+# タスクの複雑さに基づいてタイムアウト時間を動的に計算
+calculate_dynamic_timeout() {
+    local task_desc="$1"
+    local task_desc_lower=$(echo "$task_desc" | tr '[:upper:]' '[:lower:]')
+    local timeout="$BASE_TIMEOUT"
+
+    # 複雑なタスクキーワード（×3 = 30分）
+    local complex_keywords=(
+        "実装" "implement" "作成" "create" "build" "構築"
+        "設計" "design" "architecture" "アーキテクチャ"
+        "統合" "integrate" "integration" "連携"
+        "マイグレーション" "migration" "移行"
+    )
+
+    # 中程度のタスクキーワード（×2 = 20分）
+    local medium_keywords=(
+        "修正" "fix" "update" "更新" "変更" "change"
+        "追加" "add" "拡張" "extend" "enhance"
+        "リファクタ" "refactor" "改善" "improve"
+        "テスト" "test" "spec"
+    )
+
+    # 複雑なタスクかチェック
+    for keyword in "${complex_keywords[@]}"; do
+        if [[ "$task_desc_lower" == *"$keyword"* ]]; then
+            timeout=$((BASE_TIMEOUT * 3))
+            log "INFO" "複雑なタスクを検出: '$keyword' -> タイムアウト ${timeout}秒" >&2
+            echo "$timeout"
+            return 0
+        fi
+    done
+
+    # 中程度のタスクかチェック
+    for keyword in "${medium_keywords[@]}"; do
+        if [[ "$task_desc_lower" == *"$keyword"* ]]; then
+            timeout=$((BASE_TIMEOUT * 2))
+            log "INFO" "中程度のタスクを検出: '$keyword' -> タイムアウト ${timeout}秒" >&2
+            echo "$timeout"
+            return 0
+        fi
+    done
+
+    # デフォルト（ベースタイムアウト）
+    log "INFO" "標準タスク -> タイムアウト ${timeout}秒" >&2
+    echo "$timeout"
+}
+
+# 現在のタスクのタイムアウトを取得（環境変数または動的計算）
+get_task_timeout() {
+    local task_desc="$1"
+
+    # 環境変数が設定されている場合はそれを優先
+    if [[ -n "$CLAUDE_TIMEOUT" ]]; then
+        echo "$CLAUDE_TIMEOUT"
+    else
+        calculate_dynamic_timeout "$task_desc"
+    fi
+}
+
+# ==============================================================================
 # タスク実行
 # ==============================================================================
 
@@ -164,6 +239,8 @@ execute_task() {
     local task_id="$2"
     local task_desc="$3"
     local system_prompt=$(load_agent "$agent")
+
+
 
     printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
     printf "%b" "${CYAN}  タスク実行中${NC}\n"
@@ -194,6 +271,9 @@ execute_task() {
     # プロジェクトルートに移動してClaude CLIを実行
     cd "$PROJECT_ROOT"
 
+    # 動的タイムアウトを計算
+    local task_timeout=$(get_task_timeout "$task_desc")
+
     # Claude CLIを実行（-pフラグで非対話モード）
     # EOFをパイプして処理後に終了させる
     # タイムアウト付き実行（macOS対応: Perlのalarmを使用）
@@ -205,11 +285,11 @@ execute_task() {
     local exec_start_ts=$(date +"%Y-%m-%d %H:%M:%S")
     log "INFO" "Claude CLI実行開始: $exec_start_ts"
     log "INFO" "  タスク: [#$task_id] $task_desc"
-    log "INFO" "  タイムアウト設定: ${CLAUDE_TIMEOUT}秒"
+    log "INFO" "  タイムアウト設定: ${task_timeout}秒（動的調整）"
 
     # Perlのalarm機能でタイムアウトを実装（macOSのtimeoutコマンドなし対応）
     # --verboseフラグで詳細ログ（思考プロセスなど）を出力
-    output=$(perl -e "alarm $CLAUDE_TIMEOUT; exec @ARGV;" \
+    output=$(perl -e "alarm $task_timeout; exec @ARGV;" \
         /bin/bash -c "echo \"\" | claude -p --verbose --system-prompt \"$system_prompt\" \"$prompt\" 2>&1" \
         2>&1)
     exit_code=$?
@@ -245,11 +325,11 @@ execute_task() {
         return 0
     elif [[ $exit_code -eq 142 ]] || [[ $exit_code -eq 124 ]]; then
         # タイムアウト（SIGALRMは142=128+14）
-        local timeout_msg="Claude Codeが${CLAUDE_TIMEOUT}秒でタイムアウトしました"
+        local timeout_msg="Claude Codeが${task_timeout}秒でタイムアウトしました"
         fail_task "$task_id" "$timeout_msg"
         log "ERROR" "タイムアウト: [#$task_id] $timeout_msg"
         printf "%b" "${RED}✗ タスク失敗: #$task_id - ${timeout_msg}${NC}\n"
-        printf "%b" "${YELLOW}  環境変数 CLAUDE_TIMEOUT でタイムアウト時間を変更できます（現在: ${CLAUDE_TIMEOUT}秒）${NC}\n"
+        printf "%b" "${YELLOW}  環境変数 CLAUDE_TIMEOUT または BASE_TIMEOUT でタイムアウト時間を変更できます${NC}\n"
         return 1
     else
         # タスクを失敗

@@ -6,43 +6,32 @@ set -euo pipefail
 
 # スクリプトのディレクトリを取得 (.claude ディレクトリ)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DASHBOARD="$SCRIPT_DIR/scripts/dashboard.sh"
+DASHBOARD_BIN="$SCRIPT_DIR/bin/control-center"
 ORCHESTRATOR="$SCRIPT_DIR/scripts/orchestrator.sh"
 AGENT_SCRIPT="$SCRIPT_DIR/agent.sh"
 
-# 色定義
-COLOR_SUCCESS='\033[38;5;82m'
-COLOR_ERROR='\033[38;5;203m'
-COLOR_INFO='\033[38;5;33m'
-COLOR_WARNING='\033[38;5;214m'
-NC='\033[0m'
+# ... (color defs) ...
 
-# 依存関係チェック
 check_dependencies() {
+    # No longer need jq/ncurses for dashboard itself, but orchestrator might need them.
+    # Keep checks for now.
     local missing=()
-    
-    for cmd in jq tput; do
+    for cmd in jq; do
         if ! command -v "$cmd" &> /dev/null; then
             missing+=("$cmd")
         fi
     done
-    
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        printf "%b" "${COLOR_ERROR}Error: 以下のコマンドが必要です:${NC}\n"
-        for cmd in "${missing[@]}"; do
-            printf "  - %s\n" "$cmd"
-        done
-        printf "\n"
-        printf "%b" "${COLOR_INFO}インストール方法:${NC}\n"
-        printf "  macOS: brew install jq ncurses\n"
-        printf "  Ubuntu/Debian: sudo apt-get install jq ncurses-bin\n"
-        exit 1
-    fi
+    # ...
 }
 
 # ダッシュボード表示
 show_dashboard() {
-    bash "$DASHBOARD"
+    if [[ -x "$DASHBOARD_BIN" ]]; then
+        "$DASHBOARD_BIN"
+    else
+        printf "%b" "${COLOR_ERROR}Error: control-center binary not found at $DASHBOARD_BIN${NC}\n"
+        exit 1
+    fi
 }
 
 # ヘルプ表示
@@ -126,6 +115,9 @@ main() {
             auto_mode
             ;;
         "")
+            show_dashboard
+            ;;
+        "dashboard")
             show_dashboard
             ;;
         *)

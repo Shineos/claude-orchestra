@@ -233,17 +233,20 @@ tui_draw_task_compact() {
 
     tui_move "$row" "$col"
 
-    # タスクID
+    # タスクID（#付き、約3文字）
     printf "${color}#${task_id}${NC} "
     if [[ "$selected" == "true" ]]; then
         printf "${REVERSE}${BOLD}"
     fi
 
-    # 優先度バッジ
-    printf " ${priority_badge} "
+    # 優先度バッジ（約4文字）
+    printf "${priority_badge} "
 
-    # 説明
-    local max_desc=$((width - 12))
+    # 説明 - IDと優先度の分を引いた残り幅を使用
+    # #<id> = 約4文字, 優先度 = 約5文字, スペース = 2文字 = 計11文字
+    local id_len=$(( ${#task_id} + 2 ))
+    local max_desc=$((width - id_len - 10))
+    [[ $max_desc -lt 5 ]] && max_desc=5
     local short_desc=$(tui_truncate "$description" "$max_desc")
     printf "${short_desc}"
 
@@ -307,12 +310,18 @@ tui_draw_column() {
     local task_count=$(echo "$tasks_json" | jq 'length' 2>/dev/null | tr -d '[:space:]')
     task_count=${task_count:-0}
 
+    local color=$(tui_get_status_color "$status")
+
     # カラム描画
     local current_row=$row
     local task_idx=0
     local max_row=$((row + height))
 
     while [[ $current_row -lt $max_row ]]; do
+        # 左ボーダー
+        tui_move "$current_row" "$col"
+        printf "${color}│${NC}"
+
         if [[ $task_idx -lt $task_count ]]; then
             local task=$(echo "$tasks_json" | jq ".[$task_idx]" 2>/dev/null)
             local task_id=$(echo "$task" | jq -r '.id' 2>/dev/null | tr -d '[:space:]')
@@ -334,20 +343,18 @@ tui_draw_column() {
             printf "%$((width - 2))s" " "
         fi
 
+        # 右ボーダー
+        tui_move "$current_row" $((col + width - 1))
+        printf "${color}│${NC}"
+
         ((current_row++))
     done
 
     # 下辺
     tui_move "$current_row" "$col"
-    printf "│"
-    tui_hline $((width - 2)) " "
-    printf "│"
-    ((current_row++))
-
-    tui_move "$current_row" "$col"
-    printf "└"
-    tui_hline $((width - 2)) "─"
-    printf "┘"
+    printf "${color}└${NC}"
+    tui_hline $((width - 2)) "─" "$color"
+    printf "${color}┘${NC}"
 }
 
 # =============================================================================
@@ -477,7 +484,10 @@ tui_draw_taskboard() {
     local footer_height=3
     local board_row=$((header_height + summary_height))
     local board_height=$((rows - header_height - summary_height - footer_height))
-    local col_width=14
+    # 列幅を画面サイズに応じて動的に計算（最小20、最大30）
+    local col_width=$(( (cols - 10) / 5 ))
+    [[ $col_width -lt 20 ]] && col_width=20
+    [[ $col_width -gt 30 ]] && col_width=30
     local col_count=5
     local board_width=$((col_width * col_count + 6))
     local board_col=$(( (cols - board_width) / 2 ))

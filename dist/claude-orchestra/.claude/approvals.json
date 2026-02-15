@@ -1,0 +1,22 @@
+{
+  "approvals": [
+    {
+      "id": 1,
+      "task_id": "1",
+      "operation_type": "test",
+      "details": {
+        "test": "data"
+      },
+      "requested_at": "2026-02-12T12:36:11Z",
+      "requested_by": "test-user",
+      "status": "approved",
+      "response": {
+        "action": "approved",
+        "responded_at": "2026-02-12T12:36:11Z",
+        "responded_by": "grace",
+        "comment": "日本語コメント OK ✅"
+      }
+    }
+  ],
+  "last_id": 1
+}
