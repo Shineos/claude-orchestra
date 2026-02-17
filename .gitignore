@@ -1,4 +1,5 @@
 **/logs/*
+**/*.log
 **/tmp/*
 .tmp/*
 
@@ -19,3 +20,5 @@ spec/
 .claude/tasks.json
 
 .claude/approvals.json
+
+dist/**/*

@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -19,7 +20,8 @@ type Task struct {
 }
 
 type TasksData struct {
-	Tasks []Task `json:"tasks"`
+	Tasks  []Task `json:"tasks"`
+	LastID int    `json:"last_id"`
 }
 
 // Msg types
@@ -51,17 +53,16 @@ func FetchTasksCmd() tea.Cmd {
 	}
 }
 
-// AddTaskCmd executes the orchestrator script to add a task
-func AddTaskCmd(desc string) tea.Cmd {
+// AddTaskCmd executes the orchestrator script to add a task, optionally with an agent
+func AddTaskCmd(desc string, agent string) tea.Cmd {
 	return func() tea.Msg {
 		scriptPath := findScriptPath()
+		args := []string{"add", desc}
+		if agent != "" {
+			args = append(args, agent)
+		}
 
-		// Execute orchestrator.sh add "desc"
-		// We set USE_AI=false to avoid interactive prompts in this context if possible, 
-		// but typically 'add' might be interactive. 
-		// For the TUI, we probably want non-interactive add if we supply description.
-		// Let's use ORCH_AUTO_CONFIRM=yes for now to simplify.
-		cmd := exec.Command("bash", scriptPath, "add", desc)
+		cmd := exec.Command("bash", append([]string{scriptPath}, args...)...)
 		cmd.Env = append(os.Environ(), "ORCH_AUTO_CONFIRM=yes", "USE_AI=false", "ORCH_NO_AUTO_LAUNCH=yes")
 		
 		output, err := cmd.CombinedOutput()
@@ -69,8 +70,6 @@ func AddTaskCmd(desc string) tea.Cmd {
 			return ErrorMsg(fmt.Errorf("add task failed: %v\nOutput: %s", err, output))
 		}
 
-		// After adding, we should probably fetch tasks again
-		// But for now, let's just return a success msg or re-fetch
 		return FetchTasksCmd()()
 	}
 }
@@ -104,12 +103,101 @@ func CompleteTaskCmd(id int) tea.Cmd {
 // StopTaskCmd executes orchestrator.sh stop <id>
 func StopTaskCmd(id int) tea.Cmd {
 	return func() tea.Msg {
+		// First, verify the task exists and has an agent
 		scriptPath := findScriptPath()
-		cmd := exec.Command("bash", scriptPath, "stop", fmt.Sprintf("%d", id))
-		output, err := cmd.CombinedOutput()
+
+		// Check if task exists and get agent
+		checkCmd := exec.Command("bash", scriptPath, "check-task", fmt.Sprintf("%d", id))
+		output, err := checkCmd.CombinedOutput()
 		if err != nil {
+			return ErrorMsg(fmt.Errorf("task #%d not found or error checking: %v\nOutput: %s", id, err, output))
+		}
+
+		// Now try to stop
+		cmd := exec.Command("bash", scriptPath, "stop", fmt.Sprintf("%d", id))
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			// If stop failed, still refresh tasks so UI is up to date
+			_ = FetchTasksCmd()()
 			return ErrorMsg(fmt.Errorf("stop task failed: %v\nOutput: %s", err, output))
 		}
+		return FetchTasksCmd()()
+	}
+}
+
+
+// EditTaskCmd updates the description of a task
+func EditTaskCmd(id int, newDescription string) tea.Cmd {
+	return func() tea.Msg {
+		// Calculate tasks.json path (same logic as FetchTasksCmd)
+		path := ".claude/tasks.json"
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			path = "../../.claude/tasks.json"
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return ErrorMsg(fmt.Errorf("failed to read tasks.json for editing: %w", err))
+		}
+
+		// Use Decoder with UseNumber to preserve numeric precision/type
+		var root map[string]interface{}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		if err := decoder.Decode(&root); err != nil {
+			return ErrorMsg(fmt.Errorf("failed to parse tasks.json for editing: %w", err))
+		}
+
+        tasksList, ok := root["tasks"].([]interface{})
+        if !ok {
+             return ErrorMsg(fmt.Errorf("invalid tasks.json format: tasks field missing or not an array"))
+        }
+
+		// Find and update task
+		found := false
+		for _, item := range tasksList {
+            taskMap, ok := item.(map[string]interface{})
+            if !ok {
+                continue
+            }
+            
+            // ID is generic number, handle as json.Number if UseNumber() was used
+            idVal := taskMap["id"]
+            var taskID int
+            switch v := idVal.(type) {
+            case json.Number:
+                 i, _ := v.Int64()
+                 taskID = int(i)
+            case float64:
+                 taskID = int(v)
+            case int:
+                 taskID = v
+            }
+            
+            if taskID == id {
+                taskMap["description"] = newDescription
+                found = true
+                break
+            }
+		}
+
+		if !found {
+			return ErrorMsg(fmt.Errorf("task #%d not found", id))
+		}
+        
+        // No need to re-assign tasksList to root["tasks"] because slice elements are pointers/references to map?
+        // Wait, slice of interface{} contains maps. Maps are references. So modifying taskMap works.
+
+		// Write back to file
+		updatedData, err := json.MarshalIndent(root, "", "  ")
+		if err != nil {
+			return ErrorMsg(fmt.Errorf("failed to marshal updated tasks: %w", err))
+		}
+
+		if err := os.WriteFile(path, updatedData, 0644); err != nil {
+			return ErrorMsg(fmt.Errorf("failed to write tasks.json: %w", err))
+		}
+
 		return FetchTasksCmd()()
 	}
 }
@@ -133,11 +221,46 @@ func RemoveTaskCmd(id int) tea.Cmd {
 	}
 }
 
+// SpawnAgentCmd launches an agent in watch mode
+func SpawnAgentCmd(agentName string) tea.Cmd {
+	return func() tea.Msg {
+		// agent.sh is usually in .claude/agent.sh
+		// We need to find the right path similarly to orchestrator.sh
+		scriptPath := ".claude/agent.sh"
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			scriptPath = "../agent.sh"
+		}
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			scriptPath = "../../.claude/agent.sh"
+		}
+
+		// Use nohup or similar to fully detach if needed, but for now we'll use a background exec.
+		// Actually, starting it as a detached process is better so it lives beyond the TUI's session if needed,
+		// but often we want it to be tied to the project.
+		cmd := exec.Command("bash", scriptPath, agentName, "watch")
+		
+		// Detach the process
+		err := cmd.Start()
+		if err != nil {
+			return ErrorMsg(fmt.Errorf("failed to spawn agent %s: %w", agentName, err))
+		}
+		
+		// We don't wait for it! Just return success or a log message.
+		// Since it's a Cmd that doesn't return a Msg normally if it's fire-and-forget,
+		// we return a small log message.
+		return fmt.Sprintf("Agent %s launched in background.", agentName)
+	}
+}
+
 // LogsTuiCmd executes orchestrator.sh logs-tui
 // This runs an interactive TUI, so we need tea.ExecProcess
-func LogsTuiCmd() tea.Cmd {
+func LogsTuiCmd(id int) tea.Cmd {
 	scriptPath := findScriptPath()
-	c := exec.Command("bash", scriptPath, "logs-tui", "-f")
+	args := []string{scriptPath, "logs-tui", "-f"}
+	if id > 0 {
+		args = append(args, "--task", fmt.Sprintf("%d", id))
+	}
+	c := exec.Command("bash", args...)
     c.Stdin = os.Stdin
     c.Stdout = os.Stdout
     c.Stderr = os.Stderr

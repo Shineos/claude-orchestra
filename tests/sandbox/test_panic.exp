@@ -1,0 +1,13 @@
+#!/usr/bin/expect -f
+set timeout 5
+log_user 1
+spawn .claude/bin/control-center
+expect "Claude Orchestra"
+send "e"
+expect "Task ID" || { puts "FAIL: No Task ID prompt"; exit 1 }
+send "2\r"
+expect {
+    "DEBUG PANIC" { puts "\nSUCCESS: Panic triggered!" }
+    timeout { puts "\nFAIL: No panic seen"; exit 1 }
+    eof { puts "\nEOF seen (maybe panic)" }
+}

@@ -45,58 +45,61 @@ func (m MainModel) View() string {
     gap := 1
 	halfWidth := (totalWidth - gap) / 2 
 	
-	// Heights: Header(2) + Footer(4) + DocMargin(2) = 8 reserved?
+	// Heights: Header(2) + Footer(4) + DocMargin(2) = 8 reserved
+    // Enforce fixed height for Event Log to prevent layout shifts
+    const fixedEventHeight = 8 
 	availableHeight := m.Height - 8
-	listHeight := availableHeight * 2 / 3 // Give more space to lists
-	eventHeight := availableHeight - listHeight
+	listHeight := availableHeight - fixedEventHeight
 
 	if listHeight < 5 {
 		listHeight = 5 // Minimum height
 	}
 
 	// 1. Pending Tasks Panel (Left)
+    pStyle := panelStyle
+    if m.Tab == 0 {
+        pStyle = activePanelStyle
+    }
 	m.pendingList.SetSize(halfWidth-2, listHeight-2) // -2 for Border+Padding (approx)
 	pendingView := m.pendingList.View()
-	pendingPanel := panelStyle.Copy().
+	pendingPanel := pStyle.Copy().
 		Width(halfWidth).
 		Height(listHeight).
 		MarginRight(gap). // Add gap
 		Render(pendingView)
 
 	// 2. Active Task Panel (Right)
+    aStyle := panelStyle
+    if m.Tab == 1 {
+        aStyle = activePanelStyle
+    }
 	m.activeList.SetSize(halfWidth-2, listHeight-2)
 	activeView := m.activeList.View()
-	activePanel := activePanelStyle.Copy().
+	activePanel := aStyle.Copy().
 		Width(halfWidth).
 		Height(listHeight).
 		Render(activeView)
 
 	// 3. Event Log Panel (Bottom)
-	// Fix: Use subtle border color for Event Log
-    // Width must be top row total (half + gap + half)
+	// Fix: Use fixed height and pad content to prevent border jitter
     eventsWidth := (halfWidth * 2) + gap
     
-    // Render last few events
+    // Render last few events (always exactly 5 lines or padding)
     var eventText string
-    if len(m.events) > 0 {
-        // Show last 5 events
-        count := 0
-        for _, e := range m.events {
-            eventText += fmt.Sprintf("• %s\n", e)
-            count++
-            if count >= 5 {
-                break
-            }
+    maxEvents := 5
+    for i := 0; i < maxEvents; i++ {
+        if i < len(m.events) {
+            eventText += fmt.Sprintf("• %s\n", m.events[i])
+        } else {
+            eventText += "\n" // Pad with empty lines
         }
-    } else {
-        eventText = "(No recent events)"
     }
     
 	eventsContent := fmt.Sprintf("Event Log...\n%s", eventText)
 	eventsPanel := panelStyle.Copy().
-		BorderForeground(highlight). // Change border color back to visible
+		BorderForeground(highlight).
 		Width(eventsWidth).    
-		Height(eventHeight).
+		Height(fixedEventHeight).
 		Render(eventsContent)
 
 	// Combine Panels
@@ -107,7 +110,7 @@ func (m MainModel) View() string {
 	mainView := lipgloss.JoinVertical(lipgloss.Left, topRow, eventsPanel)
 
 	// Header
-	header := titleStyle.Render("💠 CLAUDE ORCHESTRA | CONTROL CENTER v2.0")
+	header := titleStyle.Render("💠 CLAUDE ORCHESTRA | CONTROL CENTER v2.1")
 
 	// Footer (Commands)
 	// Structure:
@@ -124,7 +127,7 @@ func (m MainModel) View() string {
         // Normal Mode Footer
         // Use special color for Command Mode indicator
         cmdStatus := lipgloss.NewStyle().Foreground(special).Render("(Command Mode)")
-        helpText := "[A] Add Task  [S] Start  [C] Complete  [L] Logs  [E] Edit  [R] Scan  [Q] Exit"
+        helpText := "[Tab] Switch  [A] Add  [S] Start  [C] Complete  [L] Logs  [E] Edit  [W] Watch  [R] Scan  [Q] Exit"
         footer = fmt.Sprintf("%s\n%s", cmdStatus, helpText)
 	}
     

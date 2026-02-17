@@ -1,0 +1,65 @@
+#!/usr/bin/expect -f
+set timeout 10
+
+# Spawn bash to run the TUI
+# Ensure we use .claude/orchestra.sh which launches the binary
+spawn bash .claude/orchestra.sh
+
+# Wait for TUI load
+expect "Claude Orchestra"
+sleep 1
+
+# --- Test Start [S] with ID ---
+# Task 1 is pending
+send "s" 
+expect "Task ID"
+send "1\r"
+# Verify "Starting task #1" appears in logs/events
+expect {
+    "Starting task #1" { puts "\nOK: Started Task #1" }
+    timeout { puts "\nFAIL: Did not see Starting task #1"; exit 1 }
+}
+sleep 1
+
+# --- Test Complete [C] with ID ---
+# Task 1 is now in_progress (hopefully) or let's use Task 3 which is in_progress
+send "c"
+expect "Task ID"
+send "3\r"
+expect {
+    "Completing task #3" { puts "\nOK: Completed Task #3" }
+    timeout { puts "\nFAIL: Did not see Completing task #3"; exit 1 }
+}
+sleep 1
+
+# --- Test Edit [E] with ID ---
+# Use Task 2
+send "e"
+expect "Task ID"
+send "2\r"
+expect {
+    "Edited task #2" { puts "\nOK: Edited Task #2" }
+    timeout { puts "\nFAIL: Did not see Edited task #2"; exit 1 }
+}
+sleep 1
+
+# --- Test Logs [L] with ID ---
+# Use task 1
+send "l"
+expect "Task ID (0 for all)"
+send "1\r"
+# Should enter logs-tui.
+# We look for "Monitoring logs..." or just ensure we don't crash.
+# Waiting a bit.
+sleep 2
+# Exit logs (Ctrl+C sends \003)
+send "\003"
+# Expect return to main TUI
+expect {
+    "Claude Orchestra" { puts "\nOK: Returned from Logs" }
+    timeout { puts "\nFAIL: Did not return from Logs"; exit 1 }
+}
+
+# Cleanup
+send "q"
+expect eof

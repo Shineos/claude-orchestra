@@ -5,6 +5,7 @@ import (
 )
 
 type item struct {
+	id          int
 	title, desc string
 }
 

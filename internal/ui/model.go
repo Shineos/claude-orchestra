@@ -22,7 +22,12 @@ type MainModel struct {
 	// Data
 	Tasks        []orchestrator.Task
     events       []string // Event log history
-	
+    ActiveCommand string   // Current command waiting for ID input (start, complete, logs, edit)
+    ActiveTaskID  int      // ID being input/confirmed
+
+	// Process tracking - for cleanup
+	editorTempFile string // Track temp file for cleanup
+
 	// Components
 	pendingList  list.Model
 	activeList   list.Model

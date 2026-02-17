@@ -10,7 +10,15 @@ DASHBOARD_BIN="$SCRIPT_DIR/bin/control-center"
 ORCHESTRATOR="$SCRIPT_DIR/scripts/orchestrator.sh"
 AGENT_SCRIPT="$SCRIPT_DIR/agent.sh"
 
-# ... (color defs) ...
+
+# --------------------------------------------------------------------------------
+# カラー設定
+# --------------------------------------------------------------------------------
+COLOR_INFO="\033[0;36m"
+COLOR_SUCCESS="\033[0;32m"
+COLOR_WARNING="\033[0;33m"
+COLOR_ERROR="\033[0;31m"
+NC="\033[0m"
 
 check_dependencies() {
     # No longer need jq/ncurses for dashboard itself, but orchestrator might need them.
@@ -27,7 +35,18 @@ check_dependencies() {
 # ダッシュボード表示
 show_dashboard() {
     if [[ -x "$DASHBOARD_BIN" ]]; then
+        # Set up cleanup for child processes
+        trap 'kill $(jobs -p) 2>/dev/null' EXIT INT TERM
+
+        # Run the dashboard and wait for it to complete
         "$DASHBOARD_BIN"
+        local exit_code=$?
+
+        # Clean up any remaining child processes
+        kill $(jobs -p) 2>/dev/null || true
+        wait $(jobs -p) 2>/dev/null || true
+
+        return $exit_code
     else
         printf "%b" "${COLOR_ERROR}Error: control-center binary not found at $DASHBOARD_BIN${NC}\n"
         exit 1

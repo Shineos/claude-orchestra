@@ -3308,6 +3308,24 @@ case "${1:-}" in
     agents)
         show_agents_status
         ;;
+    check-task)
+        # Check if a task exists and return its agent
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            exit 1
+        fi
+
+        task_id="$2"
+        agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE" 2>/dev/null)
+
+        if [[ -n "$agent" && "$agent" != "null" ]]; then
+            echo "OK:$agent"
+            exit 0
+        else
+            printf "%b" "${RED}エラー: タスクID #$task_id が見つからないか、エージェントが割り当てられていません${NC}\n"
+            exit 1
+        fi
+        ;;
     stop)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: エージェント名を指定してください${NC}\n"
