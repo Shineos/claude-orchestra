@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"shineos/claude-orchestra/internal/orchestrator"
 )
 
@@ -237,7 +239,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.Input.Focus()
                 return m, textinput.Blink
             case "s", "S":
-                if m.Tab == 0 || m.Tab == 1 {
+                if m.Tab == 0 || m.Tab == 1 || m.Tab == 2 {
                     id := m.getSelectedID()
                     m.InputMode = true
                     m.ActiveCommand = "start"
@@ -265,7 +267,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     return m, textinput.Blink
                 }
             case "e", "E":
-                if m.Tab == 0 || m.Tab == 1 {
+                if m.Tab == 0 || m.Tab == 1 || m.Tab == 2 {
                     id := m.getSelectedID()
                     m.InputMode = true
                     m.ActiveCommand = "edit"
@@ -281,8 +283,8 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             case "r", "R":
                 m.events = append([]string{"Scanning tasks..."}, m.events...)
                 cmds = append(cmds, orchestrator.FetchTasksCmd())
-            case "x":
-                // x is stop (similar logic to others)
+            case "x", "X", "t", "T", "k", "K":
+                // Stop/Terminate task
                 if m.Tab == 0 || m.Tab == 1 {
                      var id int
                      if m.Tab == 0 && len(m.pendingList.Items()) > 0 {
@@ -308,6 +310,8 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     list = &m.pendingList
                 } else if m.Tab == 1 {
                     list = &m.activeList
+                } else if m.Tab == 2 {
+                    list = &m.completeList
                 }
                 
                 if list != nil && len(list.Items()) > 0 {
@@ -348,11 +352,11 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                  return m, textinput.Blink
 
             case "tab":
-                m.Tab = (m.Tab + 1) % 2
+                m.Tab = (m.Tab + 1) % 3
             case "left":
-                m.Tab = 0
+                m.Tab = (m.Tab - 1 + 3) % 3
             case "right":
-                m.Tab = 1
+                m.Tab = (m.Tab + 1) % 3
             }
         }
 
@@ -365,10 +369,13 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case orchestrator.TaskLoadMsg:
+		m.Tasks = msg // Update the main task list source of truth
 		// Show pending and recently completed tasks in pending list
-		m.pendingList.SetItems(tasksToItems(msg, "pending"))
-		// Show in_progress, failed, and stopped in active list
-		m.activeList.SetItems(tasksToItems(msg, "in_progress", "failed", "stopped"))
+		m.pendingList.SetItems(tasksToItems(msg, m.SessionStartTime, "pending"))
+		// Show in_progress, failed, stopped
+		m.activeList.SetItems(tasksToItems(msg, m.SessionStartTime, "in_progress", "failed", "stopped"))
+		// Show completed
+		m.completeList.SetItems(tasksToItems(msg, m.SessionStartTime, "completed"))
 		m.Loaded = true
 		m.events = append([]string{"Tasks refreshed."}, m.events...)
 		m.Spinner, _ = m.Spinner.Update(spinner.TickMsg{})
@@ -379,11 +386,34 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Handle global updates
-	m.pendingList, cmd = m.pendingList.Update(msg)
-	cmds = append(cmds, cmd)
+    var cmdList tea.Cmd
+    
+    // Only pass key messages to the active list to prevent simultaneous scrolling
+    _, isKey := msg.(tea.KeyMsg)
+    _, isMouse := msg.(tea.MouseMsg) // Mouse events also need to be routed or handled by both? List handles scroll wheel.
 
-	m.activeList, cmd = m.activeList.Update(msg)
-	cmds = append(cmds, cmd)
+    if isKey || isMouse {
+        if m.Tab == 0 {
+            m.pendingList, cmdList = m.pendingList.Update(msg)
+            cmds = append(cmds, cmdList)
+        } else if m.Tab == 1 {
+            m.activeList, cmdList = m.activeList.Update(msg)
+            cmds = append(cmds, cmdList)
+        } else {
+            m.completeList, cmdList = m.completeList.Update(msg)
+            cmds = append(cmds, cmdList)
+        }
+    } else {
+        // Pass other messages (tick, resize, etc) to both
+        m.pendingList, cmdList = m.pendingList.Update(msg)
+        cmds = append(cmds, cmdList)
+    
+        m.activeList, cmdList = m.activeList.Update(msg)
+        cmds = append(cmds, cmdList)
+
+        m.completeList, cmdList = m.completeList.Update(msg)
+        cmds = append(cmds, cmdList)
+    }
 
 	return m, tea.Batch(cmds...)
 }
@@ -392,6 +422,8 @@ func (m MainModel) getSelectedID() int {
     activeList := &m.pendingList
     if m.Tab == 1 {
         activeList = &m.activeList
+    } else if m.Tab == 2 {
+        activeList = &m.completeList
     }
     
     if len(activeList.Items()) > 0 {
@@ -400,20 +432,12 @@ func (m MainModel) getSelectedID() int {
         }
     }
     
-    // Fallback to the other list if current is empty or nothing selected
-    otherList := &m.activeList
-    if m.Tab == 1 {
-        otherList = &m.pendingList
-    }
-    if len(otherList.Items()) > 0 {
-        if i, ok := otherList.SelectedItem().(item); ok {
-            return i.id
-        }
-    }
+    // Check all lists? Or just fail?
+    // User expects to operate on selected item.
     return 0
 }
 
-func tasksToItems(tasks []orchestrator.Task, statuses ...string) []list.Item {
+func tasksToItems(tasks []orchestrator.Task, sessionStart time.Time, statuses ...string) []list.Item {
 	var items []list.Item
 	for _, t := range tasks {
 		match := false
@@ -423,6 +447,23 @@ func tasksToItems(tasks []orchestrator.Task, statuses ...string) []list.Item {
 				break
 			}
 		}
+
+        // Filter completed items by session time
+        if match && t.Status == "completed" {
+             // Parse UpdatedAt
+             // Format from script: date -u +"%Y-%m-%dT%H:%M:%SZ"
+             // Go RFC3339 matches this.
+             if t.UpdatedAt != "" {
+                 uTime, err := time.Parse(time.RFC3339, t.UpdatedAt)
+                 if err == nil {
+                     if uTime.Before(sessionStart) {
+                         match = false
+                     }
+                 }
+                 // If parse fails or empty, show it (fallback)
+             }
+        }
+
 		if match {
 			prefix := ""
 			if t.Status == "failed" {
@@ -431,17 +472,36 @@ func tasksToItems(tasks []orchestrator.Task, statuses ...string) []list.Item {
 				prefix = "[STOPPED] "
 			}
 
-			// Determine model badge
-			var badge string
-			switch t.Agent {
-			case "planner", "architect", "orchestrator", "root-cause-verifier":
-				badge = "[Opus]"
-			case "tests", "tester", "reviewer":
-				badge = "[Haiku]"
-			default:
-				// frontend, backend, docs, etc.
-				badge = "[Sonnet]"
-			}
+            // Determine Agent Color
+            // Define colors
+            var color lipgloss.Color
+            switch strings.ToLower(t.Agent) {
+            case "tests", "tester":
+                color = lipgloss.Color("197") // Red-ish
+            case "frontend", "ui":
+                color = lipgloss.Color("39") // Blue
+            case "backend", "api":
+                color = lipgloss.Color("208") // Orange
+            case "docs":
+                color = lipgloss.Color("220") // Yellow
+            default:
+                color = lipgloss.Color("240") // Grey/Default
+            }
+            
+            agentTag := lipgloss.NewStyle().
+                Background(color).
+                Foreground(lipgloss.Color("255")).
+                Bold(true).
+                Padding(0, 1).
+                Render(t.Agent)
+
+            if t.Agent == "" {
+                agentTag = lipgloss.NewStyle().
+                Background(lipgloss.Color("237")).
+                Foreground(lipgloss.Color("245")).
+                Padding(0, 1).
+                Render("Unassigned")
+            }
 
 			// Handle empty descriptions
 			desc := t.Description
@@ -451,7 +511,7 @@ func tasksToItems(tasks []orchestrator.Task, statuses ...string) []list.Item {
 
 			items = append(items, item{
 				id:    t.ID,
-				title: fmt.Sprintf("%s%s #%d %s", badge, prefix, t.ID, t.Agent),
+				title: fmt.Sprintf("%s %s#%d", agentTag, prefix, t.ID),
 				desc:  desc,
 			})
 		}

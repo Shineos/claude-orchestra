@@ -1761,8 +1761,9 @@ start_task() {
     fi
 
     local current_status=$(echo "$task" | jq -r '.status')
-    if [[ "$current_status" != "pending" ]]; then
-        printf "%b" "${YELLOW}タスク [ID: $task_id] は既に開始されているか、完了しています (状態: $current_status)${NC}\n"
+    # pending, stopped, failed のタスクのみ開始可能
+    if [[ "$current_status" != "pending" && "$current_status" != "stopped" && "$current_status" != "failed" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は既に実行中または完了しています (状態: $current_status)${NC}\n"
         return 1
     fi
 
@@ -1796,8 +1797,9 @@ complete_task() {
     fi
 
     local current_status=$(echo "$task" | jq -r '.status')
-    if [[ "$current_status" != "in_progress" ]]; then
-        printf "%b" "${YELLOW}タスク [ID: $task_id] は実行中ではありません (状態: $current_status)${NC}\n"
+    # Allow both in_progress and pending tasks to be completed
+    if [[ "$current_status" != "in_progress" && "$current_status" != "pending" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は実行中または待機中ではありません (状態: $current_status)${NC}\n"
         return 1
     fi
 
@@ -1807,27 +1809,31 @@ complete_task() {
     orch_log "INFO" "タスク完了: [#$task_id] $task_desc (担当: $task_agent)"
     [[ -n "$notes" ]] && orch_log "INFO" "  メモ: $notes"
 
+    # Define update query to handle setting completed status, timestamps, and notes
+    # We also ensure started_at is set if it was null (for pending tasks)
+    local query
     if [[ -n "$notes" ]]; then
-        jq --argjson id "$task_id" \
-           --arg notes "$notes" \
-           --arg timestamp "$timestamp" \
-           '.tasks |= map(if .id == $id then
+        query='.tasks |= map(if .id == $id then
                .status = "completed" |
                .completed_at = $timestamp |
                .updated_at = $timestamp |
+               (.started_at //= $timestamp) |
                .notes += [{"type": "complete", "text": $notes, "timestamp": $timestamp}]
-           else . end)' \
-           "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+           else . end)'
     else
-        jq --argjson id "$task_id" \
-           --arg timestamp "$timestamp" \
-           '.tasks |= map(if .id == $id then
+        query='.tasks |= map(if .id == $id then
                .status = "completed" |
                .completed_at = $timestamp |
-               .updated_at = $timestamp
-           else . end)' \
-           "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+               .updated_at = $timestamp |
+               (.started_at //= $timestamp)
+           else . end)'
     fi
+
+    jq --argjson id "$task_id" \
+       --arg notes "$notes" \
+       --arg timestamp "$timestamp" \
+       "$query" \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] を完了しました${NC}\n"
 }
@@ -2951,12 +2957,12 @@ show_dependencies() {
 # 循環依存検出
 detect_circular_dependency() {
     local task_id="$1"
-    local visited=()
 
-    # 再帰的に依存関係をチェック
+    # 再帰的に依存関係をチェック (path is a space-separated string of IDs)
     check_circular() {
         local current_id="$1"
-        local depth="${2:-0}"
+        local path="$2"
+        local depth="${3:-0}"
 
         # 深さ制限（無限ループ防止）
         if [[ $depth -gt 50 ]]; then
@@ -2964,15 +2970,16 @@ detect_circular_dependency() {
             return 1
         fi
 
-        # 訪問済みチェック
-        for visited_id in "${visited[@]}"; do
-            if [[ "$visited_id" == "$current_id" ]]; then
-                printf "%b" "${RED}エラー: 循環依存を検出: #$current_id${NC}\n" >&2
+        # 循環チェック (current_id がパスに含まれているかを確認)
+        for pid in $path; do
+            if [[ "$pid" == "$current_id" ]]; then
+                printf "%b" "${RED}エラー: 循環依存を検出: #$current_id (パス: $path)${NC}\n" >&2
                 return 1
             fi
         done
 
-        visited+=("$current_id")
+        # 新しいパス (現在のIDを追加)
+        local new_path="$path $current_id"
 
         # 依存先を取得
         local deps=$(jq -r --argjson id "$current_id" \
@@ -2982,7 +2989,7 @@ detect_circular_dependency() {
         # 依存先を再帰的にチェック
         while IFS= read -r dep_id; do
             [[ -z "$dep_id" ]] && continue
-            if ! check_circular "$dep_id" $((depth + 1)); then
+            if ! check_circular "$dep_id" "$new_path" $((depth + 1)); then
                 return 1
             fi
         done <<< "$deps"
@@ -2990,7 +2997,7 @@ detect_circular_dependency() {
         return 0
     }
 
-    check_circular "$task_id"
+    check_circular "$task_id" ""
 }
 
 # =============================================================================

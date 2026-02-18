@@ -37,16 +37,14 @@ func (m MainModel) View() string {
 
 	// Calculate widths and heights
 	// Available: Width - 4 (Doc Margins)
-	// Top Row: Pending(50%) + Active(50%)
-	// Bottom: Events(100%)
+	// Columns: Pending, Active, Complete (3 cols)
 	
-	// Reduce total width slightly to prevent wrapping issues on right edge
 	totalWidth := m.Width - 6 
     gap := 1
-	halfWidth := (totalWidth - gap) / 2 
+    // 3 columns, 2 gaps
+	colWidth := (totalWidth - (gap * 2)) / 3
 	
 	// Heights: Header(2) + Footer(4) + DocMargin(2) = 8 reserved
-    // Enforce fixed height for Event Log to prevent layout shifts
     const fixedEventHeight = 8 
 	availableHeight := m.Height - 8
 	listHeight := availableHeight - fixedEventHeight
@@ -60,38 +58,50 @@ func (m MainModel) View() string {
     if m.Tab == 0 {
         pStyle = activePanelStyle
     }
-	m.pendingList.SetSize(halfWidth-2, listHeight-2) // -2 for Border+Padding (approx)
+	m.pendingList.SetSize(colWidth-2, listHeight-2)
 	pendingView := m.pendingList.View()
 	pendingPanel := pStyle.Copy().
-		Width(halfWidth).
+		Width(colWidth).
 		Height(listHeight).
-		MarginRight(gap). // Add gap
+		MarginRight(gap).
 		Render(pendingView)
 
-	// 2. Active Task Panel (Right)
+	// 2. Active Task Panel (Middle)
     aStyle := panelStyle
     if m.Tab == 1 {
         aStyle = activePanelStyle
     }
-	m.activeList.SetSize(halfWidth-2, listHeight-2)
+	m.activeList.SetSize(colWidth-2, listHeight-2)
 	activeView := m.activeList.View()
 	activePanel := aStyle.Copy().
-		Width(halfWidth).
+		Width(colWidth).
 		Height(listHeight).
+		MarginRight(gap).
 		Render(activeView)
 
+    // 3. Complete Task Panel (Right)
+    cStyle := panelStyle
+    if m.Tab == 2 {
+        cStyle = activePanelStyle
+    }
+    m.completeList.SetSize(colWidth-2, listHeight-2)
+    completeView := m.completeList.View()
+    completePanel := cStyle.Copy().
+        Width(colWidth).
+        Height(listHeight).
+        Render(completeView)
+
 	// 3. Event Log Panel (Bottom)
-	// Fix: Use fixed height and pad content to prevent border jitter
-    eventsWidth := (halfWidth * 2) + gap
+    eventsWidth := (colWidth * 3) + (gap * 2)
     
-    // Render last few events (always exactly 5 lines or padding)
+    // Render last few events
     var eventText string
     maxEvents := 5
     for i := 0; i < maxEvents; i++ {
         if i < len(m.events) {
             eventText += fmt.Sprintf("• %s\n", m.events[i])
         } else {
-            eventText += "\n" // Pad with empty lines
+            eventText += "\n" 
         }
     }
     
@@ -103,39 +113,26 @@ func (m MainModel) View() string {
 		Render(eventsContent)
 
 	// Combine Panels
-	// Top Row
-	topRow := lipgloss.JoinHorizontal(lipgloss.Top, pendingPanel, activePanel)
-	
-	// Main View (Vertical)
+	topRow := lipgloss.JoinHorizontal(lipgloss.Top, pendingPanel, activePanel, completePanel)
 	mainView := lipgloss.JoinVertical(lipgloss.Left, topRow, eventsPanel)
 
 	// Header
-	header := titleStyle.Render("💠 CLAUDE ORCHESTRA | CONTROL CENTER v2.1")
+	header := titleStyle.Render("💠 CLAUDE ORCHESTRA | CONTROL CENTER v2.2")
 
 	// Footer (Commands)
-	// Structure:
-	// (Command)
-	// (input Key, select Agets, etc)
-	
     var footer string
 	if m.InputMode {
-        // Input Mode Footer
 		inputView := m.Input.View()
         helpText := "[Enter]: Confirm    [Esc]: Cancel"
         footer = fmt.Sprintf("%s\n%s", inputView, helpText)
 	} else {
-        // Normal Mode Footer
-        // Use special color for Command Mode indicator
         cmdStatus := lipgloss.NewStyle().Foreground(special).Render("(Command Mode)")
-        helpText := "[Tab] Switch  [A] Add  [S] Start  [C] Complete  [L] Logs  [E] Edit  [W] Watch  [R] Scan  [Q] Exit"
+        helpText := "[Tab] Switch  [A] Add  [S] Start  [T] Stop  [C] Complete  [L] Logs  [E] Edit  [W] Watch  [R] Scan  [Q] Exit"
         footer = fmt.Sprintf("%s\n%s", cmdStatus, helpText)
 	}
     
     footerView := lipgloss.NewStyle().Foreground(subtle).MarginTop(1).Render(footer)
 
-	// Combine All
-	// Use JoinVertical for header + main + footer to ensure alignment
-    // Remove docStyle from JoinVertical to prevent global margin clipping header
     content := lipgloss.JoinVertical(lipgloss.Left, header, mainView, footerView)
 	return docStyle.Render(content)
 }

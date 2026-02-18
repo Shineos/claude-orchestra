@@ -24,7 +24,7 @@ NC='\033[0m'
 # このスクリプトの場所
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$(dirname "$SCRIPT_DIR")"
-LOGS_DIR="$CLAUDE_DIR/logs"
+LOGS_DIR="${LOGS_DIR:-$CLAUDE_DIR/logs}"
 
 # デフォルト値
 DEFAULT_LINES=20
@@ -89,22 +89,22 @@ get_log_color() {
 get_agent_color() {
     local agent="$1"
     case "$agent" in
-        Frontend|FRONTEND)
+        Frontend|FRONTEND|frontend)
             echo "$CYAN"
             ;;
-        Backend|BACKEND)
+        Backend|BACKEND|backend)
             echo "$GREEN"
             ;;
-        Architect|ARCHITECT)
+        Architect|ARCHITECT|architect)
             echo "$MAGENTA"
             ;;
-        Reviewer|REVIEWER)
+        Reviewer|REVIEWER|reviewer)
             echo "$YELLOW"
             ;;
-        Tests|TESTS)
+        Tests|TESTS|tests)
             echo "$BLUE"
             ;;
-        Docs|DOCS)
+        Docs|DOCS|docs)
             echo "$GRAY"
             ;;
         *)
@@ -130,11 +130,19 @@ parse_and_display_log() {
             rest="${rest#*\] }"
         fi
 
-        # エージェント抽出
+        # エージェント抽出 (形式: [AGENT] または (担当: AGENT))
         local agent=""
+        local agent_pattern=""
+        
         if [[ "$rest" =~ \[([A-Za-z]+)\] ]]; then
             agent="${BASH_REMATCH[1]}"
-            rest="${rest#*\] }"
+            rest="${rest#*\] }" # [AGENT] をメッセージから除去して表示するか？
+            # agent.shの場合、メッセージ本文はその後ろ。
+        elif [[ "$rest" =~ \(担当:\ ([A-Za-z0-9_-]+)(,\ .*)?\) ]]; then
+            # orchestrator.sh の形式: (担当: agent, ...)
+            agent="${BASH_REMATCH[1]}"
+            # この場合はメッセージ内に残るが、ハイライトしたいので別途処理
+            agent_pattern="(担当: $agent"
         fi
 
         local log_color=$(get_log_color "$level")
@@ -145,12 +153,31 @@ parse_and_display_log() {
             printf "${GRAY}[%s]${NC} " "${timestamp:0:16}"
         fi
 
-        if [[ -n "$agent" ]]; then
-            printf " ${agent_color}[%s]${NC}" "$agent"
+        # [AGENT] 形式の場合は先頭に表示
+        if [[ "$rest" =~ ^\ *\[${agent}\] ]]; then
+             # Remove [AGENT] from rest to avoid duplicate if we rely on regex above?
+             # Actually regex above `rest="${rest#*\] }"` removes it IF it matched `[[ "$rest" =~ \[([A-Za-z]+)\] ]]`.
+             # So we are good.
+             printf " ${agent_color}[%s]${NC}" "$agent"
+        elif [[ -n "$agent" && -z "$agent_pattern" ]]; then
+             # Extracted but not via (担当:), likely [AGENT]
+             printf " ${agent_color}[%s]${NC}" "$agent"
         fi
 
         printf " ${log_color}%-7s${NC}" "$level"
-        printf " %s\n" "$rest"
+        
+        # メッセージ本文のハイライト
+        if [[ -n "$agent_pattern" ]]; then
+             # (担当: xxx) をハイライト
+             # sedで置換は複雑なので、単純に表示
+             # しかしユーザーは「背景色とか」と言っている。
+             # エージェント名を強調表示
+             # restの中の `(担当: agent` を `(担当: ${agent_color}agent${NC}` に置換
+             local highlighted_rest=$(echo "$rest" | sed "s/担当: $agent/担当: ${agent_color}${agent}${NC}/g")
+             printf " %b\n" "$highlighted_rest"
+        else
+             printf " %s\n" "$rest"
+        fi
     else
         # パースできない場合はそのまま表示
         printf "%s\n" "$line"
@@ -172,6 +199,11 @@ get_recent_logs() {
     local log_date=$(date +"%Y-%m-%d")
     local log_files=()
 
+    # If Task ID filter is present, force search all logs to find task history
+    if [[ -n "$TASK_FILTER_ID" ]]; then
+        search_all="true"
+    fi
+
     if [[ "$search_all" == "true" ]]; then
         # すべてのログファイルを検索
         while IFS= read -r file; do
@@ -188,7 +220,35 @@ get_recent_logs() {
 
     # エージェントフィルタ
     local grep_filter=""
-    if [[ -n "$agent_filter" ]]; then
+    
+    # Task ID Filter (extends agent filter)
+    if [[ -n "$TASK_FILTER_ID" ]]; then
+        local task_json="$CLAUDE_DIR/tasks.json"
+        if [[ -f "$task_json" ]]; then
+            # Get agent for the task
+            local task_agent=$(jq -r --arg id "$TASK_FILTER_ID" '.tasks[] | select(.id == ($id|tonumber)) | .agent' "$task_json" 2>/dev/null)
+            
+            if [[ -n "$task_agent" && "$task_agent" != "null" ]]; then
+                # Filter for Task ID OR Agent Name
+                local agent_upper=$(echo "$task_agent" | tr '[:lower:]' '[:upper:]')
+                # Escape brackets for grep if needed, but [ ] are fine in quotes usually or use -F? 
+                # Better use egrep (-E)
+                # Pattern: "\[#ID\]|\[AGENT\]"
+                # We need to escape brackets for regex: \[#ID\]
+                grep_filter="grep -E \"\[#${TASK_FILTER_ID}\]|\[${agent_upper}\]\""
+                
+                # Update visual filter text if empty
+                if [[ -z "$agent_filter" ]]; then
+                   LOG_FILTER="Task #$TASK_FILTER_ID ($task_agent)"
+                fi
+            else
+                 # Fallback to just Task ID if agent not found
+                 grep_filter="grep \"\[#${TASK_FILTER_ID}\]\""
+            fi
+        else
+             grep_filter="grep \"\[#${TASK_FILTER_ID}\]\""
+        fi
+    elif [[ -n "$agent_filter" ]]; then
         local agent_upper=$(echo "$agent_filter" | tr '[:lower:]' '[:upper:]')
         grep_filter="grep -i \"\[${agent_upper}\]\""
     fi
@@ -205,6 +265,7 @@ get_recent_logs() {
     # ログを読み取り
     for log_file in "${log_files[@]}"; do
         if [[ -n "$grep_filter" ]]; then
+            # echo "Debug: $grep_filter '$log_file'" >> /tmp/debug_log.txt
             eval "$grep_filter '$log_file' 2>/dev/null | tail -n $lines"
         else
             tail -n "$lines" "$log_file" 2>/dev/null
@@ -224,39 +285,102 @@ follow_logs() {
     printf "${GRAY}═══════════════════════════════════════════════════════════════════${NC}\n\n"
 
     if command -v tail &> /dev/null; then
-        local log_file="$LOGS_DIR/agent-$(date +"%Y-%m-%d").log"
+        local log_date=$(date +"%Y-%m-%d")
+        local agent_log="$LOGS_DIR/agent-${log_date}.log"
+        local orch_log="$LOGS_DIR/orchestrator-${log_date}.log"
 
-        if [[ ! -f "$log_file" ]]; then
-            printf "${YELLOW}警告: 本日のログファイルがありません${NC}\n"
-            return
+        # 利用可能なログファイルを収集
+        local log_files=()
+        [[ -f "$agent_log" ]] && log_files+=("$agent_log")
+        [[ -f "$orch_log" ]] && log_files+=("$orch_log")
+
+        if [[ ${#log_files[@]} -eq 0 ]]; then
+            printf "${YELLOW}ログファイルが見つかりません。作成されるのを待ちます...${NC}\n"
+            while [[ ! -f "$agent_log" && ! -f "$orch_log" ]]; do
+                sleep 1
+            done
+            [[ -f "$agent_log" ]] && log_files+=("$agent_log")
+            [[ -f "$orch_log" ]] && log_files+=("$orch_log")
         fi
 
-        # tail -f でフォロー
-        if [[ -n "$agent_filter" ]]; then
+        # フィルタパターンの構築
+        local filter_pattern=""
+        
+        # Task ID Filter logic
+        if [[ -n "$TASK_FILTER_ID" ]]; then
+            local task_json="$CLAUDE_DIR/tasks.json"
+             if [[ -f "$task_json" ]]; then
+                local task_agent=$(jq -r --arg id "$TASK_FILTER_ID" '.tasks[] | select(.id == ($id|tonumber)) | .agent' "$task_json" 2>/dev/null)
+                if [[ -n "$task_agent" && "$task_agent" != "null" ]]; then
+                    local agent_upper=$(echo "$task_agent" | tr '[:lower:]' '[:upper:]')
+                    # Escape for regex: [#ID] -> \[\#ID\]
+                    filter_pattern="\[#${TASK_FILTER_ID}\]|\[${agent_upper}\]"
+                else
+                    filter_pattern="\[#${TASK_FILTER_ID}\]"
+                fi
+             else
+                 filter_pattern="\[#${TASK_FILTER_ID}\]"
+             fi
+        elif [[ -n "$agent_filter" ]]; then
             local agent_upper=$(echo "$agent_filter" | tr '[:lower:]' '[:upper:]')
+            filter_pattern="\[${agent_upper}\]"
+        fi
+
+        # 履歴の表示 (最新50件)
+        # 全ログファイルから検索して時系列順に表示
+        if [[ -n "$filter_pattern" ]]; then
+            # printf "${GRAY}--- 履歴 (最新50件) ---${NC}\n"
+            
+            # grepコマンド構築 (履歴用)
+            # findで全ログファイルを取得し、xargs grepで検索
+            # エラーフィルタがある場合は追加
+            
+            local history_cmd="find \"$LOGS_DIR\" -name \"*.log\" -type f -print0 | xargs -0 grep -h -E -- \"$filter_pattern\""
+            
             if [[ "$errors_only" == "true" ]]; then
-                tail -f "$log_file" 2>/dev/null | grep -i --line-buffered "\[${agent_upper}\]" | grep -i --line-buffered error | while read -r line; do
-                    clear_line
-                    parse_and_display_log "$line"
-                done
-            else
-                tail -f "$log_file" 2>/dev/null | grep -i --line-buffered "\[${agent_upper}\]" | while read -r line; do
-                    clear_line
-                    parse_and_display_log "$line"
-                done
+                history_cmd="$history_cmd | grep -i error"
             fi
+            
+            # sortで時系列順に並べ替え (ログはタイムスタンプで始まるため)
+            history_cmd="$history_cmd | sort | tail -n 50"
+            
+            eval "$history_cmd" | while read -r line; do
+                 parse_and_display_log "$line"
+            done
+            # printf "${GRAY}------------------------${NC}\n"
+        fi
+
+        # tail -f でフォロー (ライブ監視)
+        local tail_grep_cmd=""
+        if [[ -n "$filter_pattern" ]]; then
+            tail_grep_cmd="grep -E --line-buffered -- \"$filter_pattern\""
+        fi
+
+        # Combine with error filter if needed
+        if [[ "$errors_only" == "true" ]]; then
+             if [[ -n "$tail_grep_cmd" ]]; then
+                 tail_grep_cmd="$tail_grep_cmd | grep -i --line-buffered error"
+             else
+                 tail_grep_cmd="grep -i --line-buffered error"
+             fi
+        fi
+
+        # Execute: tail both files
+        if [[ -n "$tail_grep_cmd" ]]; then
+             local full_cmd="tail -f ${log_files[*]} 2>/dev/null | $tail_grep_cmd"
+             eval "$full_cmd" | while read -r line; do
+                 [[ "$line" == "==>"* ]] && continue
+                 [[ -z "$line" ]] && continue
+                 clear_line
+                 parse_and_display_log "$line"
+             done
         else
-            if [[ "$errors_only" == "true" ]]; then
-                tail -f "$log_file" 2>/dev/null | grep -i --line-buffered error | while read -r line; do
-                    clear_line
-                    parse_and_display_log "$line"
-                done
-            else
-                tail -f "$log_file" 2>/dev/null | while read -r line; do
-                    clear_line
-                    parse_and_display_log "$line"
-                done
-            fi
+            tail -f "${log_files[@]}" 2>/dev/null | while read -r line; do
+                [[ "$line" == "==>"* ]] && continue
+                [[ -z "$line" ]] && continue
+                clear_line
+                parse_and_display_log "$line"
+            done
         fi
     else
         printf "${RED}エラー: tail コマンドが見つかりません${NC}\n"
@@ -326,6 +450,20 @@ main() {
                 search_all="true"
                 shift
                 ;;
+            --task)
+                # Task filtering: we will grep for [#ID] which is the standard log format for task actions
+                # However, agent logs might not always have the task ID. 
+                # Ideally, we should filter by the agent assigned to the task, but for now let's try strict task ID provided.
+                # If the user wants agent logs, they can filter by agent.
+                # But looking at client.go, it passes --task <id>.
+                # So we interpret this as filtering for "[#<id>]".
+                if [[ -n "$2" ]]; then
+                    LOG_FILTER="Task #$2"
+                    # We append to the grep filter later
+                    task_id="$2"
+                fi
+                shift 2
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -336,11 +474,27 @@ main() {
                 shift
                 ;;
             *)
-                show_help
-                exit 1
+                # Unknown argument, ignore or show help. 
+                # To prevent breaking if client sends something new, checking for -* usually helps, 
+                # but let's assume anything else is an agent filter if not dashes.
+                if [[ "$1" == -* ]]; then
+                    shift 
+                else
+                    agent_filter="$1"
+                    LOG_FILTER="$1"
+                    shift
+                fi
                 ;;
         esac
     done
+
+    # Add task filter to grep if task_id is set
+    # Note: get_recent_logs and follow_logs need to handle this.
+    # We will modify grep_filter construction in those functions usually, 
+    # but here we can just pass it as an extra arg or sets global?
+    # The functions take specific args. Let's export a global variable for task filter or refactor.
+    # Simpler: Export TASK_FILTER_ID variable for the functions to use.
+    export TASK_FILTER_ID="$task_id"
 
     if [[ "$mode" == "follow" ]]; then
         follow_logs "$agent_filter" "$errors_only"

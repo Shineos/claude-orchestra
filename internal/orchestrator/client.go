@@ -17,6 +17,7 @@ type Task struct {
 	Status      string `json:"status"` // pending, in_progress, completed, failed
 	Agent       string `json:"agent"`
 	Priority    string `json:"priority"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type TasksData struct {
@@ -55,23 +56,34 @@ func FetchTasksCmd() tea.Cmd {
 
 // AddTaskCmd executes the orchestrator script to add a task, optionally with an agent
 func AddTaskCmd(desc string, agent string) tea.Cmd {
-	return func() tea.Msg {
-		scriptPath := findScriptPath()
-		args := []string{"add", desc}
-		if agent != "" {
-			args = append(args, agent)
-		}
-
-		cmd := exec.Command("bash", append([]string{scriptPath}, args...)...)
-		cmd.Env = append(os.Environ(), "ORCH_AUTO_CONFIRM=yes", "USE_AI=false", "ORCH_NO_AUTO_LAUNCH=yes")
-		
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return ErrorMsg(fmt.Errorf("add task failed: %v\nOutput: %s", err, output))
-		}
-
-		return FetchTasksCmd()()
+	scriptPath := findScriptPath()
+	args := []string{scriptPath, "add", desc}
+	if agent != "" {
+		args = append(args, agent)
 	}
+
+	c := exec.Command("bash", args...)
+	// Remove ORCH_AUTO_CONFIRM=yes to allow interactive mode
+	// Remove USE_AI=false to allow AI usage if configured (or keep it if we want speed?)
+	// Actually, the user wants interactive agent selection, so we should allow interaction.
+	// We should probably NOT force any env vars that disable interaction.
+    // However, we might want to keep ORCH_NO_AUTO_LAUNCH=yes if we don't want it to auto launch.
+    // But let's remove them to match standard behavior for now, or just keep ORCH_NO_AUTO_LAUNCH.
+    // The user's goal is agent selection.
+	c.Env = os.Environ() 
+    // If we want to force interactive mode for agent selection, we might need to ensure
+    // we don't pass -y or similar flags if they existed. But here we just used to set env vars.
+    
+    c.Stdin = os.Stdin
+    c.Stdout = os.Stdout
+    c.Stderr = os.Stderr
+
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return ErrorMsg(err)
+		}
+		return FetchTasksCmd()()
+	})
 }
 
 // StartTaskCmd executes orchestrator.sh start <id>

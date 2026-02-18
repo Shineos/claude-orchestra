@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -11,13 +13,14 @@ import (
 // MainModel is the main state of the application
 type MainModel struct {
 	// State
-	Tab          int // 0: Pending, 1: Active, 2: Events
+	Tab          int // 0: Pending, 1: Active, 2: Complete
 	InputMode    bool
 	Quitting     bool
 	Loaded       bool
 	Width        int
 	Height       int
 	Err          error
+    SessionStartTime time.Time // To filter old completed tasks
 
 	// Data
 	Tasks        []orchestrator.Task
@@ -31,6 +34,7 @@ type MainModel struct {
 	// Components
 	pendingList  list.Model
 	activeList   list.Model
+	completeList list.Model
 	Spinner      spinner.Model
 	Input        textinput.Model
 }
@@ -47,26 +51,30 @@ func InitialModel() MainModel {
 
 	// Initialize Lists
 	pItems := []list.Item{
-		item{title: "Fix TUI Layout", desc: "Resolve ncurses resizing issues"},
-		item{title: "Add Auth Logic", desc: "Integrate Supabase Auth"},
+		item{title: "Loading...", desc: "Fetching tasks from orchestrator"},
 	}
 	pList := list.New(pItems, list.NewDefaultDelegate(), 0, 0)
 	pList.Title = "Pending Tasks"
 	pList.SetShowHelp(false)
 
-	aItems := []list.Item{
-		item{title: "Refactor API", desc: "Optimize RPC calls"},
-	}
+	aItems := []list.Item{}
 	aList := list.New(aItems, list.NewDefaultDelegate(), 0, 0)
-	aList.Title = "Active / Recent"
+	aList.Title = "Active Tasks"
 	aList.SetShowHelp(false)
 
+	cItems := []list.Item{}
+	cList := list.New(cItems, list.NewDefaultDelegate(), 0, 0)
+	cList.Title = "Completed"
+	cList.SetShowHelp(false)
+
 	return MainModel{
-		Tab:         0,
-		Spinner:     s,
-		Input:       ti,
-		pendingList: pList,
-		activeList:  aList,
+		Tab:              0,
+		Spinner:          s,
+		Input:            ti,
+		pendingList:      pList,
+		activeList:       aList,
+		completeList:     cList,
+		SessionStartTime: time.Now(),
 	}
 }
 
