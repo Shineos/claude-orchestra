@@ -37,6 +37,14 @@ type MainModel struct {
 	completeList list.Model
 	Spinner      spinner.Model
 	Input        textinput.Model
+
+	// Wizard State for Add Task
+	AddingTask       bool
+	AddingStep       int // 1: Desc, 2: Agent, 3: Confirm
+	PendingTaskDesc  string
+	PendingTaskAgent string
+	AgentChoiceIndex int
+	AgentChoices     []string
 }
 
 // InitialModel returns the initial state of the application
@@ -75,6 +83,17 @@ func InitialModel() MainModel {
 		activeList:       aList,
 		completeList:     cList,
 		SessionStartTime: time.Now(),
+		AgentChoices: []string{
+			"AI (auto)",
+			"frontend",
+			"backend",
+			"tests",
+			"docs",
+			"planner",
+			"architect",
+			"reviewer",
+			"tester",
+		},
 	}
 }
 

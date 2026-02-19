@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -249,7 +250,7 @@ func SpawnAgentCmd(agentName string) tea.Cmd {
 		// Use nohup or similar to fully detach if needed, but for now we'll use a background exec.
 		// Actually, starting it as a detached process is better so it lives beyond the TUI's session if needed,
 		// but often we want it to be tied to the project.
-		cmd := exec.Command("bash", scriptPath, agentName, "watch")
+		cmd := exec.Command("bash", scriptPath, "watch", agentName)
 		
 		// Detach the process
 		err := cmd.Start()
@@ -261,6 +262,28 @@ func SpawnAgentCmd(agentName string) tea.Cmd {
 		// Since it's a Cmd that doesn't return a Msg normally if it's fire-and-forget,
 		// we return a small log message.
 		return fmt.Sprintf("Agent %s launched in background.", agentName)
+	}
+}
+
+// OpenTaskCmd opens the tasks.json file or specific task file
+func OpenTaskCmd(id int) tea.Cmd {
+	return func() tea.Msg {
+		path := ".claude/tasks.json"
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			path = "../../.claude/tasks.json"
+		}
+
+		var cmd *exec.Cmd
+		if runtime.GOOS == "darwin" {
+			cmd = exec.Command("open", path)
+		} else {
+			cmd = exec.Command("xdg-open", path)
+		}
+
+		if err := cmd.Start(); err != nil {
+			return ErrorMsg(fmt.Errorf("open task failed: %v", err))
+		}
+		return nil
 	}
 }
 

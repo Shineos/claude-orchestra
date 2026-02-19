@@ -86,15 +86,75 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
         // Logic depends on InputMode
         if m.InputMode {
+            // Special handling for AddingTask wizard
+            if m.AddingTask {
+                switch m.AddingStep {
+                case 1: // Description
+                    if msg.Type == tea.KeyEnter {
+                        desc := strings.TrimSpace(m.Input.Value())
+                        if desc != "" {
+                            m.PendingTaskDesc = desc
+                            m.AddingStep = 2
+                            m.Input.Blur() // We use keys for selection now
+                            return m, nil
+                        }
+                    }
+                case 2: // Agent Selection
+                    switch msg.Type {
+                    case tea.KeyEnter:
+                        m.PendingTaskAgent = m.AgentChoices[m.AgentChoiceIndex]
+                        if m.PendingTaskAgent == "AI (auto)" {
+                            m.PendingTaskAgent = "" // Empty means auto
+                        }
+                        m.AddingStep = 3
+                        return m, nil
+                    case tea.KeyTab, tea.KeyRight, tea.KeyDown:
+                        m.AgentChoiceIndex = (m.AgentChoiceIndex + 1) % len(m.AgentChoices)
+                        return m, nil
+                    case tea.KeyShiftTab, tea.KeyLeft, tea.KeyUp:
+                        m.AgentChoiceIndex = (m.AgentChoiceIndex - 1 + len(m.AgentChoices)) % len(m.AgentChoices)
+                        return m, nil
+                    }
+                case 3: // Confirmation
+                    if msg.Type == tea.KeyEnter {
+                        m.events = append([]string{fmt.Sprintf("Adding task: %s...", m.PendingTaskDesc)}, m.events...)
+                        cmd = orchestrator.AddTaskCmd(m.PendingTaskDesc, m.PendingTaskAgent)
+                        m.AddingTask = false
+                        m.AddingStep = 0
+                        m.InputMode = false
+                        m.Input.Blur()
+                        return m, cmd
+                    }
+                    if msg.String() == "e" || msg.String() == "E" {
+                        m.AddingStep = 1
+                        m.Input.Focus()
+                        m.Input.SetValue(m.PendingTaskDesc)
+                        return m, nil
+                    }
+                }
+
+                if msg.Type == tea.KeyEsc {
+                    m.AddingTask = false
+                    m.AddingStep = 0
+                    m.InputMode = false
+                    m.Input.Blur()
+                    return m, nil
+                }
+
+                if m.AddingStep == 1 {
+                    m.Input, cmd = m.Input.Update(msg)
+                    return m, cmd
+                }
+                return m, nil
+            }
+
             switch msg.Type {
             case tea.KeyEnter:
                 if m.Input.Value() != "" {
                     if m.ActiveCommand != "" {
                         // Parse ID
-                       						// Parse ID
-						// Parse ID
-						var id int
-						if _, err := fmt.Sscanf(m.Input.Value(), "%d", &id); err == nil && id > 0 {
+                        var id int
+                        if _, err := fmt.Sscanf(m.Input.Value(), "%d", &id); err == nil && id > 0 {
                             switch m.ActiveCommand {
                             case "start":
                                 m.events = append([]string{fmt.Sprintf("Starting task #%d...", id)}, m.events...)
@@ -105,110 +165,38 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                             case "logs":
                                 cmd = orchestrator.LogsTuiCmd(id)
                             case "edit":
-                                // We need description for edit, but finding usage...
-                                // Wait, openEditor needs description to prefill.
-                                // If we type ID manually, we need to fetch task first?
-                                // Simplified: For edit, just finding item in list is best.
-                                // But if user wants to edit arbitrary ID?
-                                // We'd need to async fetch task, but that complicates TUI.
-                                // Let's fallback to current list lookup if ID matches, else error or empty.
-                                // actually for Edit, "Edit Task #ID" -> we need new text.
-                                // The openEditor takes (id, desc).
-                                // If we don't have desc, we can pass empty? Or read from file in openEditor?
-								desc := ""
-								for _, t := range m.Tasks {
-									if t.ID == id {
-										desc = t.Description
-										break
-									}
-								}
-								cmd = openEditor(id, desc)
-							case "watch":
-								agent := ""
-								for _, t := range m.Tasks {
-									if t.ID == id {
-										agent = t.Agent
-										break
-									}
-								}
-								if agent != "" {
-									m.events = append([]string{fmt.Sprintf("Launching agent %s in background...", agent)}, m.events...)
-									cmd = orchestrator.SpawnAgentCmd(agent)
-								} else {
-									m.events = append([]string{"[ERROR] No agent assigned to this task"}, m.events...)
-								}
-							}
-							cmds = append(cmds, cmd)
-						} else {
-							m.events = append([]string{"[ERROR] Invalid ID format"}, m.events...)
-						}
-						m.ActiveCommand = ""
-					} else {
-						// Default Add Task
-						desc := m.Input.Value()
-						agent := ""
-
-						// Validate task description is not empty
-						desc = strings.TrimSpace(desc)
-						if desc == "" {
-							m.events = append([]string{"[ERROR] Task description cannot be empty"}, m.events...)
-							m.Input.SetValue("")
-							m.InputMode = false
-							m.Input.Blur()
-							m.ActiveCommand = ""
-							return m, nil
-						}
-
-						// Check for @agent syntax
-						if strings.HasPrefix(desc, "@") {
-							parts := strings.SplitN(desc, " ", 2)
-							if len(parts) > 1 {
-								candidate := strings.TrimPrefix(parts[0], "@")
-								// Basic validation for known agents
-								knownAgents := []string{"frontend", "backend", "tests", "docs", "planner", "architect", "reviewer", "tester"}
-								for _, a := range knownAgents {
-									if candidate == a {
-										agent = candidate
-										desc = strings.TrimSpace(parts[1])
-										break
-									}
-								}
-							}
-						}
-
-						// Validate again after @agent extraction
-						desc = strings.TrimSpace(desc)
-						if desc == "" {
-							m.events = append([]string{"[ERROR] Task description cannot be empty after @agent"}, m.events...)
-							m.Input.SetValue("")
-							m.InputMode = false
-							m.Input.Blur()
-							m.ActiveCommand = ""
-							return m, nil
-						}
-
-						// Simple auto-inference if no agent specified
-						if agent == "" {
-							descLower := strings.ToLower(desc)
-							if strings.Contains(descLower, "test") || strings.Contains(descLower, "spec") {
-								agent = "tests"
-							} else if strings.Contains(descLower, "ui") || strings.Contains(descLower, "css") || strings.Contains(descLower, "html") || strings.Contains(descLower, "frontend") {
-								agent = "frontend"
-							} else if strings.Contains(descLower, "api") || strings.Contains(descLower, "database") || strings.Contains(descLower, "backend") {
-								agent = "backend"
-							} else if strings.Contains(descLower, "doc") || strings.Contains(descLower, "README") {
-								agent = "docs"
-							}
-						}
-
-						if agent != "" {
-							m.events = append([]string{fmt.Sprintf("Adding task for %s: %s...", agent, desc)}, m.events...)
-						} else {
-							m.events = append([]string{fmt.Sprintf("Adding task: %s...", desc)}, m.events...)
-						}
-						cmd = orchestrator.AddTaskCmd(desc, agent)
-						cmds = append(cmds, cmd)
-					}
+                                desc := ""
+                                for _, t := range m.Tasks {
+                                    if t.ID == id {
+                                        desc = t.Description
+                                        break
+                                    }
+                                }
+                                cmd = openEditor(id, desc)
+                            case "open":
+                                m.events = append([]string{fmt.Sprintf("Opening task #%d...", id)}, m.events...)
+                                cmd = orchestrator.OpenTaskCmd(id)
+                            case "watch":
+                                agent := ""
+                                for _, t := range m.Tasks {
+                                    if t.ID == id {
+                                        agent = t.Agent
+                                        break
+                                    }
+                                }
+                                if agent != "" {
+                                    m.events = append([]string{fmt.Sprintf("Launching agent %s in background...", agent)}, m.events...)
+                                    cmd = orchestrator.SpawnAgentCmd(agent)
+                                } else {
+                                    m.events = append([]string{"[ERROR] No agent assigned to this task"}, m.events...)
+                                }
+                            }
+                            cmds = append(cmds, cmd)
+                        } else {
+                            m.events = append([]string{"[ERROR] Invalid ID format"}, m.events...)
+                        }
+                        m.ActiveCommand = ""
+                    }
                 }
                 m.Input.SetValue("")
                 m.InputMode = false
@@ -233,9 +221,12 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                 m.Quitting = true
                 return m, tea.Quit
             case "a", "A":
+                m.AddingTask = true
+                m.AddingStep = 1
                 m.InputMode = true
                 m.ActiveCommand = "" // Reset
                 m.Input.Placeholder = "Task description..."
+                m.Input.SetValue("")
                 m.Input.Focus()
                 return m, textinput.Blink
             case "s", "S":
@@ -337,6 +328,21 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                  }
                  m.Input.Focus()
                  return m, textinput.Blink
+
+             case "o", "O":
+                 if m.Tab == 0 || m.Tab == 1 || m.Tab == 2 {
+                     id := m.getSelectedID()
+                     m.InputMode = true
+                     m.ActiveCommand = "open"
+                     m.Input.Placeholder = "Task ID"
+                     if id > 0 {
+                         m.Input.SetValue(fmt.Sprintf("%d", id))
+                     } else {
+                         m.Input.SetValue("")
+                     }
+                     m.Input.Focus()
+                     return m, textinput.Blink
+                 }
 
              case "w", "W":
                  id := m.getSelectedID()

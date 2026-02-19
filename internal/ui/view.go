@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -35,104 +37,111 @@ func (m MainModel) View() string {
 		return "Bye!\n"
 	}
 
-	// Calculate widths and heights
-	// Available: Width - 4 (Doc Margins)
-	// Columns: Pending, Active, Complete (3 cols)
-	
-	totalWidth := m.Width - 6 
-    gap := 1
-    // 3 columns, 2 gaps
-	colWidth := (totalWidth - (gap * 2)) / 3
-	
-	// Heights: Header(2) + Footer(4) + DocMargin(2) = 8 reserved
-    const fixedEventHeight = 8 
-	availableHeight := m.Height - 8
-	listHeight := availableHeight - fixedEventHeight
+    W := m.Width
+    H := m.Height
 
-	if listHeight < 5 {
-		listHeight = 5 // Minimum height
-	}
-
-	// 1. Pending Tasks Panel (Left)
-    pStyle := panelStyle
-    if m.Tab == 0 {
-        pStyle = activePanelStyle
-    }
-	m.pendingList.SetSize(colWidth-2, listHeight-2)
-	pendingView := m.pendingList.View()
-	pendingPanel := pStyle.Copy().
-		Width(colWidth).
-		Height(listHeight).
-		MarginRight(gap).
-		Render(pendingView)
-
-	// 2. Active Task Panel (Middle)
-    aStyle := panelStyle
-    if m.Tab == 1 {
-        aStyle = activePanelStyle
-    }
-	m.activeList.SetSize(colWidth-2, listHeight-2)
-	activeView := m.activeList.View()
-	activePanel := aStyle.Copy().
-		Width(colWidth).
-		Height(listHeight).
-		MarginRight(gap).
-		Render(activeView)
-
-    // 3. Complete Task Panel (Right)
-    cStyle := panelStyle
-    if m.Tab == 2 {
-        cStyle = activePanelStyle
-    }
-    m.completeList.SetSize(colWidth-2, listHeight-2)
-    completeView := m.completeList.View()
-    completePanel := cStyle.Copy().
-        Width(colWidth).
-        Height(listHeight).
-        Render(completeView)
-
-	// 3. Event Log Panel (Bottom)
-    eventsWidth := (colWidth * 3) + (gap * 2)
+    // 1. DIMENSIONS (v3.5 - Optimized Layout)
+    // Horizontal buffer: 4 chars (more space)
+    // Vertical buffer: 4 lines
+    tW := W - 4
+    if tW < 60 { tW = 60 }
     
-    // Render last few events
-    var eventText string
-    maxEvents := 5
-    for i := 0; i < maxEvents; i++ {
+    tH := H - 4
+    if tH < 15 { tH = 15 }
+    
+    // Height allocation: Header(1) + Board(listH) + Log(logH) + Footer(2) = tH
+    logH := (tH * 35) / 100
+    if logH < 6 { logH = 6 }
+    listH := tH - 3 - logH 
+
+    gapW := 1
+    cW1 := (tW - (gapW * 2)) / 3
+    cW2 := cW1
+    cW3 := tW - (cW1 + cW2) - (gapW * 2)
+
+    // 2. STYLES
+    chromeH := 2 
+    chromeW := 2 
+	sBase := lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(highlight)
+	sActive := sBase.Copy().BorderForeground(accent)
+
+    // 3. RENDER PANELS
+    m.pendingList.SetSize(cW1 - chromeW, listH - chromeH)
+    ps1 := sBase
+    if m.Tab == 0 && !m.AddingTask { ps1 = sActive }
+    v1 := ps1.Width(cW1).Height(listH).Render(m.pendingList.View())
+
+    m.activeList.SetSize(cW2 - chromeW, listH - chromeH)
+    as2 := sBase
+    if m.Tab == 1 && !m.AddingTask { as2 = sActive }
+    v2 := as2.Width(cW2).Height(listH).Render(m.activeList.View())
+
+    m.completeList.SetSize(cW3 - chromeW, listH - chromeH)
+    cs3 := sBase
+    if m.Tab == 2 && !m.AddingTask { cs3 = sActive }
+    v3 := cs3.Width(cW3).Height(listH).Render(m.completeList.View())
+
+    // Log
+    logLinesH := logH - 3
+    if logLinesH < 1 { logLinesH = 1 }
+    var lLines []string
+    for i := 0; i < logLinesH; i++ {
         if i < len(m.events) {
-            eventText += fmt.Sprintf("• %s\n", m.events[i])
-        } else {
-            eventText += "\n" 
+            lLines = append(lLines, "- " + m.events[i])
         }
     }
-    
-	eventsContent := fmt.Sprintf("Event Log...\n%s", eventText)
-	eventsPanel := panelStyle.Copy().
-		BorderForeground(highlight).
-		Width(eventsWidth).    
-		Height(fixedEventHeight).
-		Render(eventsContent)
+    lTitle := "SYSTEM LOG"
+    vLog := sBase.Width(tW).Height(logH).Render(lTitle + "\n" + strings.Join(lLines, "\n"))
 
-	// Combine Panels
-	topRow := lipgloss.JoinHorizontal(lipgloss.Top, pendingPanel, activePanel, completePanel)
-	mainView := lipgloss.JoinVertical(lipgloss.Left, topRow, eventsPanel)
+    // 4. HEADER & FOOTER
+	header := lipgloss.NewStyle().Width(tW).Bold(true).Foreground(accent).
+        Render(fmt.Sprintf("💠 CLAUDE ORCHESTRA | CONTROL CENTER v1.1   [%dx%d]", W, H))
 
-	// Header
-	header := titleStyle.Render("💠 CLAUDE ORCHESTRA | CONTROL CENTER v2.2")
-
-	// Footer (Commands)
     var footer string
-	if m.InputMode {
-		inputView := m.Input.View()
-        helpText := "[Enter]: Confirm    [Esc]: Cancel"
-        footer = fmt.Sprintf("%s\n%s", inputView, helpText)
-	} else {
-        cmdStatus := lipgloss.NewStyle().Foreground(special).Render("(Command Mode)")
-        helpText := "[Tab] Switch  [A] Add  [S] Start  [T] Stop  [C] Complete  [L] Logs  [E] Edit  [W] Watch  [R] Scan  [Q] Exit"
-        footer = fmt.Sprintf("%s\n%s", cmdStatus, helpText)
-	}
-    
-    footerView := lipgloss.NewStyle().Foreground(subtle).MarginTop(1).Render(footer)
+    if m.AddingTask {
+        // Wizard Footer
+        title := lipgloss.NewStyle().Foreground(highlight).Bold(true).Render(fmt.Sprintf("STEP %d: ", m.AddingStep))
+        var content string
+        var hint string
 
-    content := lipgloss.JoinVertical(lipgloss.Left, header, mainView, footerView)
-	return docStyle.Render(content)
+        switch m.AddingStep {
+        case 1:
+            content = "Describe the task: " + m.Input.View()
+            hint = "[Enter] Next  [Esc] Cancel"
+        case 2:
+            var choices []string
+            for i, choice := range m.AgentChoices {
+                if i == m.AgentChoiceIndex {
+                    choices = append(choices, lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0")).Render(" "+choice+" "))
+                } else {
+                    choices = append(choices, choice)
+                }
+            }
+            content = "Select Agent: " + strings.Join(choices, "  ")
+            hint = "[Tab/Arrows] Change  [Enter] Next  [Esc] Cancel"
+        case 3:
+            agent := m.PendingTaskAgent
+            if agent == "" { agent = "AI (auto)" }
+            content = lipgloss.NewStyle().Foreground(special).Render(fmt.Sprintf("CONFIRM: [%s] %s", agent, m.PendingTaskDesc))
+            hint = "[Enter] Confirm  [E] Edit Description  [Esc] Cancel"
+        }
+        footer = lipgloss.JoinVertical(lipgloss.Left, title+content, lipgloss.NewStyle().Foreground(subtle).Render(hint))
+    } else {
+        // Regular Footer
+        fCmd := lipgloss.NewStyle().Foreground(special).Render("(Command Mode)")
+        fHnt := "[Tab] Move  [A] Add  [S] Start  [T] Stop  [C] Comp  [L] Logs  [E] Edit  [W] Watch  [O] Open  [Q] Exit"
+        if m.InputMode {
+            fCmd = m.Input.View()
+            fHnt = "[Enter]: Confirm  [Esc]: Cancel"
+        }
+        footer = lipgloss.JoinVertical(lipgloss.Left, fCmd, fHnt)
+    }
+
+    // 5. ASSEMBLY
+    hGap := strings.Repeat(" ", gapW)
+    mid := lipgloss.JoinHorizontal(lipgloss.Top, v1, hGap, v2, hGap, v3)
+    board := lipgloss.JoinVertical(lipgloss.Left, header, mid, vLog, footer)
+    
+	// 6. FINAL PLACEMENT (Centered but with smaller gutters)
+    return lipgloss.Place(W, H, lipgloss.Center, lipgloss.Center, board)
 }
