@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -9,6 +11,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"shineos/claude-orchestra/internal/orchestrator"
 )
+
+// Auto-refresh interval
+const autoRefreshInterval = 5 * time.Second
+
+// tickMsg is sent periodically to trigger auto-refresh
+type tickMsg struct {
+	isAuto bool // true = auto-refresh, false = manual
+}
+
+// silentRefreshMsg is used for auto-refresh without UI flicker
+type silentRefreshMsg struct{}
 
 // MainModel is the main state of the application
 type MainModel struct {
@@ -20,13 +33,14 @@ type MainModel struct {
 	Width        int
 	Height       int
 	Err          error
-    SessionStartTime time.Time // To filter old completed tasks
+	AutoRefresh  bool // Auto-refresh enabled
 
 	// Data
 	Tasks        []orchestrator.Task
-    events       []string // Event log history
-    ActiveCommand string   // Current command waiting for ID input (start, complete, logs, edit)
-    ActiveTaskID  int      // ID being input/confirmed
+	tasksHash    [32]byte // Hash of current tasks for change detection
+	events       []string // Event log history
+	ActiveCommand string   // Current command waiting for ID input (start, complete, logs, edit)
+	ActiveTaskID  int      // ID being input/confirmed
 
 	// Process tracking - for cleanup
 	editorTempFile string // Track temp file for cleanup
@@ -45,6 +59,12 @@ type MainModel struct {
 	PendingTaskAgent string
 	AgentChoiceIndex int
 	AgentChoices     []string
+}
+
+// computeTasksHash returns a hash of the tasks for change detection
+func computeTasksHash(tasks []orchestrator.Task) [32]byte {
+	data, _ := json.Marshal(tasks)
+	return sha256.Sum256(data)
 }
 
 // InitialModel returns the initial state of the application
@@ -82,7 +102,7 @@ func InitialModel() MainModel {
 		pendingList:      pList,
 		activeList:       aList,
 		completeList:     cList,
-		SessionStartTime: time.Now(),
+		AutoRefresh:      true, // Auto-refresh enabled by default
 		AgentChoices: []string{
 			"AI (auto)",
 			"frontend",
@@ -98,5 +118,11 @@ func InitialModel() MainModel {
 }
 
 func (m MainModel) Init() tea.Cmd {
-	return tea.Batch(m.Spinner.Tick, orchestrator.FetchTasksCmd())
+	return tea.Batch(
+		m.Spinner.Tick,
+		orchestrator.FetchTasksCmd(),
+		tea.Tick(autoRefreshInterval, func(t time.Time) tea.Msg {
+			return tickMsg{isAuto: true}
+		}),
+	)
 }

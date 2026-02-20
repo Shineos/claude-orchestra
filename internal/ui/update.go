@@ -21,6 +21,18 @@ type editFinishedMsg struct {
 	id   int
 }
 
+// isSignalError checks if the error is due to a signal (e.g., Ctrl+C)
+func isSignalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		exitCode := exitErr.ExitCode()
+		return exitCode >= 128 && exitCode <= 143
+	}
+	return false
+}
+
 
 
 func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -31,8 +43,16 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case editFinishedMsg:
+		// Check if error is a signal (user cancelled with Ctrl+C)
 		if msg.err != nil {
-			m.events = append([]string{fmt.Sprintf("[ERROR] Edit failed: %v", msg.err)}, m.events...)
+			// Clean up temp file on error
+			if msg.path != "" {
+				os.Remove(msg.path)
+			}
+			// Don't show error for signal interruptions (user cancelled)
+			if !isSignalError(msg.err) {
+				m.events = append([]string{fmt.Sprintf("[ERROR] Edit failed: %v", msg.err)}, m.events...)
+			}
 			return m, nil
 		}
 		content, err := os.ReadFile(msg.path)
@@ -164,6 +184,8 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                                 cmd = orchestrator.CompleteTaskCmd(id)
                             case "logs":
                                 cmd = orchestrator.LogsTuiCmd(id)
+                            case "verbose":
+                                cmd = orchestrator.OpenRawLogCmd(id)
                             case "edit":
                                 desc := ""
                                 for _, t := range m.Tasks {
@@ -272,7 +294,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                     return m, textinput.Blink
                 }
             case "r", "R":
-                m.events = append([]string{"Scanning tasks..."}, m.events...)
+                m.events = append([]string{"Refreshing tasks..."}, m.events...)
                 cmds = append(cmds, orchestrator.FetchTasksCmd())
             case "x", "X", "t", "T", "k", "K":
                 // Stop/Terminate task
@@ -329,6 +351,18 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
                  m.Input.Focus()
                  return m, textinput.Blink
 
+             case "v", "V":
+                 id := m.getSelectedID()
+                 m.InputMode = true
+                 m.ActiveCommand = "verbose"
+                 m.Input.Placeholder = "Task ID for detailed logs"
+                 if id > 0 {
+                     m.Input.SetValue(fmt.Sprintf("%d", id))
+                 } else {
+                     m.Input.SetValue("")
+                 }
+                 m.Input.Focus()
+                 return m, textinput.Blink
              case "o", "O":
                  if m.Tab == 0 || m.Tab == 1 || m.Tab == 2 {
                      id := m.getSelectedID()
@@ -375,20 +409,52 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case orchestrator.TaskLoadMsg:
-		m.Tasks = msg // Update the main task list source of truth
-		// Show pending and recently completed tasks in pending list
-		m.pendingList.SetItems(tasksToItems(msg, m.SessionStartTime, "pending"))
-		// Show in_progress, failed, stopped
-		m.activeList.SetItems(tasksToItems(msg, m.SessionStartTime, "in_progress", "failed", "stopped"))
-		// Show completed
-		m.completeList.SetItems(tasksToItems(msg, m.SessionStartTime, "completed"))
-		m.Loaded = true
-		m.events = append([]string{"Tasks refreshed."}, m.events...)
+		// Compute hash to detect changes
+		newHash := computeTasksHash(msg)
+		hasChanges := newHash != m.tasksHash
+
+		// Always update tasks data
+		m.Tasks = msg
+		m.tasksHash = newHash
+
+		// Only update UI if there are actual changes
+		if hasChanges || !m.Loaded {
+			// Show pending and recently completed tasks in pending list
+			m.pendingList.SetItems(tasksToItems(msg, "pending"))
+			// Show in_progress, failed, stopped
+			m.activeList.SetItems(tasksToItems(msg, "in_progress", "failed", "stopped"))
+			// Show completed
+			m.completeList.SetItems(tasksToItems(msg, "completed"))
+			m.Loaded = true
+		}
 		m.Spinner, _ = m.Spinner.Update(spinner.TickMsg{})
+		// Schedule next auto-refresh
+		if m.AutoRefresh {
+			cmds = append(cmds, tea.Tick(autoRefreshInterval, func(t time.Time) tea.Msg {
+				return tickMsg{isAuto: true}
+			}))
+		}
+
+	case tickMsg:
+		// Auto-refresh triggered (silent)
+		if m.AutoRefresh {
+			// Fetch tasks silently without triggering full redraw message
+			cmds = append(cmds, func() tea.Msg {
+				return silentRefreshMsg{}
+			})
+		}
+
+	case silentRefreshMsg:
+		// Perform silent fetch - no event message, no flicker
+		cmds = append(cmds, orchestrator.FetchTasksCmd())
+		// Don't add "Tasks refreshed" message for auto-refresh
 
 	case orchestrator.ErrorMsg:
 		m.Err = msg
 		m.events = append([]string{fmt.Sprintf("Error: %v", msg)}, m.events...)
+		// 既に実行中などのエラーが出た際、画面が古い状態（Pending のまま）である可能性が高いため
+		// 明示的にリフレッシュを発行して同期を促す
+		return m, func() tea.Msg { return orchestrator.FetchTasksCmd()() }
 	}
 
 	// Handle global updates
@@ -443,7 +509,7 @@ func (m MainModel) getSelectedID() int {
     return 0
 }
 
-func tasksToItems(tasks []orchestrator.Task, sessionStart time.Time, statuses ...string) []list.Item {
+func tasksToItems(tasks []orchestrator.Task, statuses ...string) []list.Item {
 	var items []list.Item
 	for _, t := range tasks {
 		match := false
@@ -454,21 +520,6 @@ func tasksToItems(tasks []orchestrator.Task, sessionStart time.Time, statuses ..
 			}
 		}
 
-        // Filter completed items by session time
-        if match && t.Status == "completed" {
-             // Parse UpdatedAt
-             // Format from script: date -u +"%Y-%m-%dT%H:%M:%SZ"
-             // Go RFC3339 matches this.
-             if t.UpdatedAt != "" {
-                 uTime, err := time.Parse(time.RFC3339, t.UpdatedAt)
-                 if err == nil {
-                     if uTime.Before(sessionStart) {
-                         match = false
-                     }
-                 }
-                 // If parse fails or empty, show it (fallback)
-             }
-        }
 
 		if match {
 			prefix := ""
@@ -476,6 +527,8 @@ func tasksToItems(tasks []orchestrator.Task, sessionStart time.Time, statuses ..
 				prefix = "[FAILED] "
 			} else if t.Status == "stopped" {
 				prefix = "[STOPPED] "
+			} else if t.Status == "in_progress" {
+				prefix = "[RUNNING] "
 			}
 
             // Determine Agent Color

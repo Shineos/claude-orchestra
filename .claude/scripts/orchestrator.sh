@@ -179,6 +179,44 @@ generate_task_id() {
     echo $((last_id + 1))
 }
 
+# タスクログのアーカイブ
+archive_task_log() {
+    local task_id=$1
+    local raw_log="$LOGS_DIR/task-${task_id}.raw.log"
+    local archive_dir="$LOGS_DIR/archive"
+
+    # アーカイブディレクトリを作成
+    mkdir -p "$archive_dir"
+
+    # raw.logが存在し、内容がある場合はアーカイブ
+    if [[ -s "$raw_log" ]]; then
+        local archive_timestamp=$(date +"%Y%m%d_%H%M%S")
+        local archive_file="$archive_dir/task-${task_id}_${archive_timestamp}.raw.log"
+        mv "$raw_log" "$archive_file"
+        orch_log "INFO" "ログをアーカイブ: $archive_file"
+    fi
+}
+
+# アーカイブされたログの一覧取得
+get_archived_logs() {
+    local task_id=$1
+    local archive_dir="$LOGS_DIR/archive"
+
+    if [[ -d "$archive_dir" ]]; then
+        ls -t "$archive_dir"/task-${task_id}_*.raw.log 2>/dev/null || true
+    fi
+}
+
+# 最新のアーカイブログを取得
+get_latest_archived_log() {
+    local task_id=$1
+    local archive_dir="$LOGS_DIR/archive"
+
+    if [[ -d "$archive_dir" ]]; then
+        ls -t "$archive_dir"/task-${task_id}_*.raw.log 2>/dev/null | head -1 || true
+    fi
+}
+
 # ==============================================================================
 # 自動振り分け機能
 # ==============================================================================
@@ -284,7 +322,23 @@ decompose_task_ai() {
     orch_log "INFO" "AI分解開始: $task_desc"
 
     # Claudeコマンドが利用可能かチェック
-    if ! command -v claude &> /dev/null; then
+    local claude_cmd="claude"
+    if ! command -v "$claude_cmd" &> /dev/null; then
+        # 標準的なインストール先をチェック
+        local common_paths=(
+            "$HOME/.local/bin/claude"
+            "/usr/local/bin/claude"
+            "/opt/homebrew/bin/claude"
+        )
+        for p in "${common_paths[@]}"; do
+            if [[ -x "$p" ]]; then
+                claude_cmd="$p"
+                break
+            fi
+        done
+    fi
+
+    if ! command -v "$claude_cmd" &> /dev/null; then
         orch_log "WARN" "claude コマンドが見つかりません。Claude Code をインストールしてください"
         return 1
     fi
@@ -307,7 +361,7 @@ decompose_task_ai() {
 
     # Claude CLIを直接呼び出し
     local cli_output
-    cli_output=$(claude -p --system-prompt "$system_prompt" --output-format text "$input_prompt" 2>&1)
+    cli_output=$($claude_cmd -p --system-prompt "$system_prompt" --output-format text "$input_prompt" 2>&1)
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
@@ -750,6 +804,13 @@ add_task_auto() {
                 # AI失敗 - ルールベースにフォールバック
                 printf "%b" "${YELLOW}AI分解に失敗しました。ルールベースを使用します...${NC}\n"
                 use_rules_fallback=true
+                
+                # すぐに JSON を生成して表示に備える
+                local subtasks=()
+                while IFS= read -r line; do
+                    subtasks+=("$line")
+                done < <(decompose_task_rules "$task_desc")
+                decomposition_json=$(subtasks_array_to_json "${subtasks[@]}")
             fi
         elif [[ "$use_rules_fallback" == "true" ]]; then
             # ルールベース分解
@@ -1772,6 +1833,10 @@ start_task() {
 
     orch_log "INFO" "タスク開始: [#$task_id] $task_desc (担当: $task_agent)"
 
+    # タスク開始時にraw.logをクリア（前回の実行ログを削除）
+    local raw_log_file="$LOGS_DIR/task-${task_id}.raw.log"
+    > "$raw_log_file" 2>/dev/null || true
+
     jq --argjson id "$task_id" \
        --arg timestamp "$timestamp" \
        '.tasks |= map(if .id == $id then
@@ -1782,6 +1847,29 @@ start_task() {
        "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] を開始しました${NC}\n"
+
+    # エージェントが実行中でない場合は起動
+    if [[ -n "$task_agent" && "$task_agent" != "null" && "$task_agent" != "orchestrator" ]]; then
+        local pid_file="$CLAUDE_DIR/pids/${task_agent}.pid"
+        local agent_running=false
+
+        if [[ -f "$pid_file" ]]; then
+            local existing_pid=$(cat "$pid_file" 2>/dev/null)
+            if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+                agent_running=true
+                printf "%b" "${CYAN}エージェント '$task_agent' は既に実行中です (PID: $existing_pid)${NC}\n"
+            fi
+        fi
+
+        if [[ "$agent_running" == "false" ]]; then
+            printf "%b" "${CYAN}エージェント '$task_agent' を起動しています...${NC}\n"
+            local log_file="$LOGS_DIR/agent-$(date +%Y-%m-%d).log"
+            nohup bash "$AGENT_SCRIPT" "$task_agent" watch >> "$log_file" 2>&1 &
+            local agent_pid=$!
+            echo "$agent_pid" > "$pid_file"
+            printf "%b" "${GREEN}✓ エージェント '$task_agent' を起動しました (PID: $agent_pid)${NC}\n"
+        fi
+    fi
 }
 
 complete_task() {
@@ -1808,6 +1896,9 @@ complete_task() {
 
     orch_log "INFO" "タスク完了: [#$task_id] $task_desc (担当: $task_agent)"
     [[ -n "$notes" ]] && orch_log "INFO" "  メモ: $notes"
+
+    # 完了したタスクのログをアーカイブ
+    archive_task_log "$task_id"
 
     # Define update query to handle setting completed status, timestamps, and notes
     # We also ensure started_at is set if it was null (for pending tasks)
@@ -2107,10 +2198,10 @@ show_status() {
     # 優先度順にソートして表示
     jq -r '.tasks | sort_by(.priority) | reverse | .[] |
         "\(.id)\t\(.status)\t\(.priority)\t\(.agent)\t\(.description)"' \
-        "$TASKS_FILE" 2>/dev/null | while IFS=$'\t' read -r id status priority agent desc; do
+        "$TASKS_FILE" 2>/dev/null | while IFS=$'\t' read -r id t_status priority agent desc; do
         local status_icon=""
         local status_color=""
-        case "$status" in
+        case "$t_status" in
             "pending")
                 status_icon="○"
                 status_color="$YELLOW"
@@ -2690,14 +2781,14 @@ worktree_list() {
             fi
 
             # ステータス
-            local status="○"
-            local status_color="$YELLOW"
+            local wt_status="○"
+            local wt_status_color="$YELLOW"
             if [[ -d "$worktree/.git" ]]; then
-                status="✓"
-                status_color="$GREEN"
+                wt_status="✓"
+                wt_status_color="$GREEN"
             fi
 
-            printf "%b" "${status_color}${status}${NC} ${CYAN}${name}${NC} (${MAGENTA}${branch}${NC})\n"
+            printf "%b" "${wt_status_color}${wt_status}${NC} ${CYAN}${name}${NC} (${MAGENTA}${branch}${NC})\n"
         fi
     done
 
@@ -3245,9 +3336,9 @@ EOF
                     # このタスクが完了するまで監視
                     while true; do
                         sleep "$check_interval"
-                        local status=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
-                        if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-                            printf "%b" "${CYAN}タスク [#$task_id] が${status}しました${NC}\n"
+                        local task_stat=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
+                        if [[ "$task_stat" == "completed" || "$task_stat" == "failed" ]]; then
+                            printf "%b" "${CYAN}タスク [#$task_id] が${task_stat}しました${NC}\n"
                             echo ""
                             break
                         fi
@@ -3282,9 +3373,9 @@ EOF
                 # このタスクが完了するまで監視
                 while true; do
                     sleep "$check_interval"
-                    local status=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
-                    if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-                        printf "%b" "${CYAN}タスク [#$task_id] が${status}しました${NC}\n"
+                    local task_stat=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
+                    if [[ "$task_stat" == "completed" || "$task_stat" == "failed" ]]; then
+                        printf "%b" "${CYAN}タスク [#$task_id] が${task_stat}しました${NC}\n"
                         echo ""
                         break
                     fi

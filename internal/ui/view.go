@@ -40,21 +40,20 @@ func (m MainModel) View() string {
     W := m.Width
     H := m.Height
 
-    // 1. DIMENSIONS (v3.5 - Optimized Layout)
-    // Horizontal buffer: 4 chars (more space)
-    // Vertical buffer: 4 lines
+    // 1. DIMENSIONS (v3.6 - Border-Aware Layout)
     tW := W - 4
     if tW < 60 { tW = 60 }
     
     tH := H - 4
     if tH < 15 { tH = 15 }
     
-    // Height allocation: Header(1) + Board(listH) + Log(logH) + Footer(2) = tH
     logH := (tH * 35) / 100
     if logH < 6 { logH = 6 }
     listH := tH - 3 - logH 
 
     gapW := 1
+    // Total row width = cW1 + Gap + cW2 + Gap + cW3 = tW
+    // Each cW here is the TOTAL width of the box including borders.
     cW1 := (tW - (gapW * 2)) / 3
     cW2 := cW1
     cW3 := tW - (cW1 + cW2) - (gapW * 2)
@@ -66,22 +65,24 @@ func (m MainModel) View() string {
 	sActive := sBase.Copy().BorderForeground(accent)
 
     // 3. RENDER PANELS
+    // Note: s.Width(n) sets the INNER content width. We must subtract chromeW.
     m.pendingList.SetSize(cW1 - chromeW, listH - chromeH)
     ps1 := sBase
     if m.Tab == 0 && !m.AddingTask { ps1 = sActive }
-    v1 := ps1.Width(cW1).Height(listH).Render(m.pendingList.View())
+    v1 := ps1.Width(cW1 - chromeW).Height(listH - chromeH).Render(m.pendingList.View())
 
     m.activeList.SetSize(cW2 - chromeW, listH - chromeH)
     as2 := sBase
     if m.Tab == 1 && !m.AddingTask { as2 = sActive }
-    v2 := as2.Width(cW2).Height(listH).Render(m.activeList.View())
+    v2 := as2.Width(cW2 - chromeW).Height(listH - chromeH).Render(m.activeList.View())
 
     m.completeList.SetSize(cW3 - chromeW, listH - chromeH)
     cs3 := sBase
     if m.Tab == 2 && !m.AddingTask { cs3 = sActive }
-    v3 := cs3.Width(cW3).Height(listH).Render(m.completeList.View())
+    v3 := cs3.Width(cW3 - chromeW).Height(listH - chromeH).Render(m.completeList.View())
 
     // Log
+    lTitle := "SYSTEM LOG"
     logLinesH := logH - 3
     if logLinesH < 1 { logLinesH = 1 }
     var lLines []string
@@ -90,8 +91,8 @@ func (m MainModel) View() string {
             lLines = append(lLines, "- " + m.events[i])
         }
     }
-    lTitle := "SYSTEM LOG"
-    vLog := sBase.Width(tW).Height(logH).Render(lTitle + "\n" + strings.Join(lLines, "\n"))
+    // Log box should also be tW wide total
+    vLog := sBase.Width(tW - chromeW).Height(logH - chromeH).Render(lTitle + "\n" + strings.Join(lLines, "\n"))
 
     // 4. HEADER & FOOTER
 	header := lipgloss.NewStyle().Width(tW).Bold(true).Foreground(accent).
@@ -129,7 +130,7 @@ func (m MainModel) View() string {
     } else {
         // Regular Footer
         fCmd := lipgloss.NewStyle().Foreground(special).Render("(Command Mode)")
-        fHnt := "[Tab] Move  [A] Add  [S] Start  [T] Stop  [C] Comp  [L] Logs  [E] Edit  [W] Watch  [O] Open  [Q] Exit"
+        fHnt := "[Tab] Move  [A] Add  [S] Start  [T] Stop  [C] Comp  [L] Logs  [V] Verbose  [E] Edit  [W] Watch  [R] Refresh  [O] Open  [Q] Exit"
         if m.InputMode {
             fCmd = m.Input.View()
             fHnt = "[Enter]: Confirm  [Esc]: Cancel"

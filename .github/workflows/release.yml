@@ -7,19 +7,76 @@ on:
 
 jobs:
   build:
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            suffix: -darwin-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: -darwin-amd64
+          - goos: linux
+            goarch: amd64
+            suffix: -linux-amd64
+
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create archive
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p bin
+          go build -ldflags="-s -w" -o bin/control-center${{ matrix.suffix }} ./cmd/control-center
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-center${{ matrix.suffix }}
+          path: bin/control-center${{ matrix.suffix }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: bin
+          pattern: control-center-*
+          merge-multiple: true
+
+      - name: Prepare release files
         run: |
           mkdir -p dist
-          # .git, .github, .DS_Store などを除外してアーカイブを作成
-          tar --exclude='./.git' --exclude='./.github' --exclude='./.DS_Store' --exclude='./dist' -czvf dist/claude-orchestra.tar.gz .
+          # Copy binaries to dist
+          cp bin/control-center-* dist/
+          # Make binaries executable
+          chmod +x dist/control-center-*
+          # Create source archive (excluding .git, etc.)
+          tar --exclude='./.git' --exclude='./.github' --exclude='./.DS_Store' --exclude='./dist' --exclude='./bin' -czvf dist/claude-orchestra.tar.gz .
+          # List files for verification
+          ls -la dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: dist/claude-orchestra.tar.gz
+          files: |
+            dist/control-center-darwin-arm64
+            dist/control-center-darwin-amd64
+            dist/control-center-linux-amd64
+            dist/claude-orchestra.tar.gz
           generate_release_notes: true

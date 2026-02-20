@@ -8,16 +8,6 @@
 #   ./agent.sh frontend    # Frontend エージェントを起動し、タスクを自動実行
 #   ./agent.sh watch       # タスクを待機して自動実行
 
-set -e
-
-# 色設定（ANSI-C quotingでエスケープシーケンスを正しく解釈）
-CYAN=$'\033[0;36m'
-GREEN=$'\033[0;32m'
-YELLOW=$'\033[1;33m'
-RED=$'\033[0;31m'
-BLUE=$'\033[0;34m'
-NC=$'\033[0m'
-
 # このスクリプトの場所
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -38,14 +28,35 @@ LOG_FILE="$LOGS_DIR/agent-$LOG_DATE.log"
 mkdir -p "$LOGS_DIR"
 
 # Claude CLI タイムアウト設定（秒）
-# タスク実行の最大待機時間。超過した場合はタイムアウトとして失敗します
-# 環境変数で上書き可能、デフォルトは動的タイムアウトを使用
-BASE_TIMEOUT="${BASE_TIMEOUT:-600}"  # ベースタイムアウト（10分）
-CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-}"  # 空なら動的タイムアウト使用
+BASE_TIMEOUT="${BASE_TIMEOUT:-600}"
+CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-}"
 
 # PIDファイルディレクトリ
 PIDS_DIR="$SCRIPT_DIR/pids"
 mkdir -p "$PIDS_DIR"
+
+# PATHの設定（~/.local/bin や /usr/local/bin を追加）
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+
+# Claude CLIのパスを確認
+CLAUDE_BIN=$(which claude 2>/dev/null || echo "claude")
+if ! command -v "$CLAUDE_BIN" &> /dev/null; then
+    # 一般的なパスを再確認
+    if [[ -x "$HOME/.local/bin/claude" ]]; then
+        CLAUDE_BIN="$HOME/.local/bin/claude"
+    elif [[ -x "/usr/local/bin/claude" ]]; then
+        CLAUDE_BIN="/usr/local/bin/claude"
+    fi
+fi
+
+# 色設定
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+MAGENTA=$'\033[0;35m'
+NC=$'\033[0m'
 
 # シグナルハンドリング
 cleanup() {
@@ -65,12 +76,15 @@ log() {
     shift
     local message="$*"
     local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-    local log_entry="[$timestamp] [$level] $message"
     
-    # stdoutに出力
-    echo "$log_entry"
+    # ANSIエスケープシーケンスを削除したメッセージ（ログファイル用）
+    local plain_message=$(echo "$message" | sed $'s/\033\[[0-9;]*m//g')
+    local log_entry="[$timestamp] [$level] $plain_message"
     
-    # ログファイルにも追記
+    # stdoutには色付きで出力
+    printf "%b" "[$timestamp] [$level] $message\n"
+    
+    # ログファイルにはプレーンテキストで追記
     if [[ -n "${LOG_FILE:-}" ]]; then
         echo "$log_entry" >> "$LOG_FILE"
     fi
@@ -283,16 +297,21 @@ execute_task() {
 
     # 詳細ログ用タイムスタンプ
     local exec_start_ts=$(date +"%Y-%m-%d %H:%M:%S")
-    log "INFO" "Claude CLI実行開始: $exec_start_ts"
-    log "INFO" "  タスク: [#$task_id] $task_desc"
-    log "INFO" "  タイムアウト設定: ${task_timeout}秒（動的調整）"
+    # 詳細ログ用ファイル（生出力を色付きで保存）
+    local RAW_LOG_FILE="$LOGS_DIR/task-${task_id}.raw.log"
+    rm -f "$RAW_LOG_FILE"
 
     # Perlのalarm機能でタイムアウトを実装（macOSのtimeoutコマンドなし対応）
     # --verboseフラグで詳細ログ（思考プロセスなど）を出力
-    output=$(perl -e "alarm $task_timeout; exec @ARGV;" \
-        /bin/bash -c "echo \"\" | claude -p --verbose --system-prompt \"$system_prompt\" \"$prompt\" 2>&1" \
-        2>&1)
+    # teeを使用して生の出力をファイルに保存しつつ、標準出力にも流す
+    perl -e "alarm $task_timeout; exec @ARGV;" \
+        /bin/bash -c "echo \"\" | $CLAUDE_BIN -p --verbose --system-prompt \"$system_prompt\" \"$prompt\" 2>&1" | tee "$RAW_LOG_FILE"
     exit_code=$?
+    
+    # 出力を変数に取得（後続の処理用）
+    if [[ -f "$RAW_LOG_FILE" ]]; then
+        output=$(cat "$RAW_LOG_FILE")
+    fi
 
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
@@ -376,11 +395,16 @@ run_agent_loop() {
         if execute_task "$agent" "$task_id" "$task_desc"; then
             task_count=$((task_count + 1))
         else
-            printf "%b" "${YELLOW}続行しますか？ (y/N):${NC} "
-            read -r -n 1 response
-            echo ""
-            if [[ ! "$response" =~ ^[Yy]$ ]]; then
-                break
+            # 標準入力がTTYの場合のみプロンプトを表示
+            if [[ -t 0 ]]; then
+                printf "%b" "${YELLOW}続行しますか？ (y/N):${NC} "
+                read -r -n 1 response
+                echo ""
+                if [[ ! "$response" =~ ^[Yy]$ ]]; then
+                    break
+                fi
+            else
+                log "INFO" "非対話モードのため自動続行します"
             fi
         fi
 

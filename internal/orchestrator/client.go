@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -68,19 +69,20 @@ func AddTaskCmd(desc string, agent string) tea.Cmd {
 	// Remove USE_AI=false to allow AI usage if configured (or keep it if we want speed?)
 	// Actually, the user wants interactive agent selection, so we should allow interaction.
 	// We should probably NOT force any env vars that disable interaction.
-    // However, we might want to keep ORCH_NO_AUTO_LAUNCH=yes if we don't want it to auto launch.
-    // But let's remove them to match standard behavior for now, or just keep ORCH_NO_AUTO_LAUNCH.
-    // The user's goal is agent selection.
-	c.Env = os.Environ() 
-    // If we want to force interactive mode for agent selection, we might need to ensure
-    // we don't pass -y or similar flags if they existed. But here we just used to set env vars.
-    
-    c.Stdin = os.Stdin
-    c.Stdout = os.Stdout
-    c.Stderr = os.Stderr
+	// However, we might want to keep ORCH_NO_AUTO_LAUNCH=yes if we don't want it to auto launch.
+	// But let's remove them to match standard behavior for now, or just keep ORCH_NO_AUTO_LAUNCH.
+	// The user's goal is agent selection.
+	c.Env = os.Environ()
+	// If we want to force interactive mode for agent selection, we might need to ensure
+	// we don't pass -y or similar flags if they existed. But here we just used to set env vars.
+
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
 
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		if err != nil {
+		// Ignore signal errors (Ctrl+C is normal cancel)
+		if err != nil && !isSignalError(err) {
 			return ErrorMsg(err)
 		}
 		return FetchTasksCmd()()
@@ -94,6 +96,8 @@ func StartTaskCmd(id int) tea.Cmd {
 		cmd := exec.Command("bash", scriptPath, "start", fmt.Sprintf("%d", id))
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			// エラー時もリフレッシュして画面の状態を同期
+			_ = FetchTasksCmd()()
 			return ErrorMsg(fmt.Errorf("start task failed: %v\nOutput: %s", err, output))
 		}
 		return FetchTasksCmd()()
@@ -107,6 +111,8 @@ func CompleteTaskCmd(id int) tea.Cmd {
 		cmd := exec.Command("bash", scriptPath, "complete", fmt.Sprintf("%d", id))
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			// エラー時もリフレッシュ
+			_ = FetchTasksCmd()()
 			return ErrorMsg(fmt.Errorf("complete task failed: %v\nOutput: %s", err, output))
 		}
 		return FetchTasksCmd()()
@@ -130,7 +136,7 @@ func StopTaskCmd(id int) tea.Cmd {
 		cmd := exec.Command("bash", scriptPath, "stop", fmt.Sprintf("%d", id))
 		output, err = cmd.CombinedOutput()
 		if err != nil {
-			// If stop failed, still refresh tasks so UI is up to date
+			// エラー時も状態を同期
 			_ = FetchTasksCmd()()
 			return ErrorMsg(fmt.Errorf("stop task failed: %v\nOutput: %s", err, output))
 		}
@@ -228,6 +234,8 @@ func RemoveTaskCmd(id int) tea.Cmd {
 		// "remove_agent" asks for confirmation.
 		output, err := cmd.CombinedOutput()
 		if err != nil {
+			// エラー時もリフレッシュ
+			_ = FetchTasksCmd()()
 			return ErrorMsg(fmt.Errorf("remove task failed: %v\nOutput: %s", err, output))
 		}
 		return FetchTasksCmd()()
@@ -237,8 +245,7 @@ func RemoveTaskCmd(id int) tea.Cmd {
 // SpawnAgentCmd launches an agent in watch mode
 func SpawnAgentCmd(agentName string) tea.Cmd {
 	return func() tea.Msg {
-		// agent.sh is usually in .claude/agent.sh
-		// We need to find the right path similarly to orchestrator.sh
+		// agent.sh のパスを探す
 		scriptPath := ".claude/agent.sh"
 		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
 			scriptPath = "../agent.sh"
@@ -247,21 +254,30 @@ func SpawnAgentCmd(agentName string) tea.Cmd {
 			scriptPath = "../../.claude/agent.sh"
 		}
 
-		// Use nohup or similar to fully detach if needed, but for now we'll use a background exec.
-		// Actually, starting it as a detached process is better so it lives beyond the TUI's session if needed,
-		// but often we want it to be tied to the project.
 		cmd := exec.Command("bash", scriptPath, "watch", agentName)
-		
-		// Detach the process
-		err := cmd.Start()
-		if err != nil {
+
+		// SysProcAttr.Setsid = true により OS レベルで新しいセッションを作成する。
+		// これにより TUI の終了シグナル（SIGINT/SIGTERM/SIGHUP）が
+		// エージェントプロセスに伝播しなくなる。
+		// setsid コマンドに依存せず macOS / Linux 両対応。
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+		// 標準入出力をすべて /dev/null に向けてデーモン化する
+		// （ダッシュボードの画面を汚さないため）
+		devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+		if err == nil {
+			cmd.Stdin = devNull
+			cmd.Stdout = devNull
+			cmd.Stderr = devNull
+		}
+
+		if err := cmd.Start(); err != nil {
 			return ErrorMsg(fmt.Errorf("failed to spawn agent %s: %w", agentName, err))
 		}
-		
-		// We don't wait for it! Just return success or a log message.
-		// Since it's a Cmd that doesn't return a Msg normally if it's fire-and-forget,
-		// we return a small log message.
-		return fmt.Sprintf("Agent %s launched in background.", agentName)
+
+		// プロセスを背後に残すので Wait はしない
+		// ステータスを即座に更新（[RUNNING] 表示にするため）するためにリフレッシュを発行
+		return func() tea.Msg { return FetchTasksCmd()() }
 	}
 }
 
@@ -287,20 +303,52 @@ func OpenTaskCmd(id int) tea.Cmd {
 	}
 }
 
-// LogsTuiCmd executes orchestrator.sh logs-tui
-// This runs an interactive TUI, so we need tea.ExecProcess
+// isSignalError checks if the error is due to a signal (e.g., Ctrl+C)
+// exit codes 128+n means signal n was received (130 = SIGINT)
+func isSignalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		// 130 = 128 + SIGINT(2), 129 = 128 + SIGHUP(1), etc.
+		// Common signals: 1 (SIGHUP), 2 (SIGINT), 15 (SIGTERM)
+		exitCode := exitErr.ExitCode()
+		return exitCode >= 128 && exitCode <= 143
+	}
+	return false
+}
+
+// LogsTuiCmd executes orchestrator.sh logs-tui with raw-task mode
+// Shows the full Claude execution log for the task
 func LogsTuiCmd(id int) tea.Cmd {
 	scriptPath := findScriptPath()
-	args := []string{scriptPath, "logs-tui", "-f"}
-	if id > 0 {
-		args = append(args, "--task", fmt.Sprintf("%d", id))
-	}
+	// Use --raw-task to show Claude execution logs (verbose level)
+	args := []string{scriptPath, "logs-tui", "--raw-task", fmt.Sprintf("%d", id)}
 	c := exec.Command("bash", args...)
-    c.Stdin = os.Stdin
-    c.Stdout = os.Stdout
-    c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		if err != nil {
+		// Ignore signal errors (Ctrl+C is normal exit)
+		if err != nil && !isSignalError(err) {
+			return ErrorMsg(err)
+		}
+		return nil
+	})
+}
+
+// OpenRawLogCmd executes tui-logs.sh --raw-task <id> (same as LogsTuiCmd now)
+// Kept for backward compatibility with [V] Verbose command
+func OpenRawLogCmd(id int) tea.Cmd {
+	scriptPath := findScriptPath()
+	args := []string{scriptPath, "logs-tui", "--raw-task", fmt.Sprintf("%d", id)}
+	c := exec.Command("bash", args...)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		// Ignore signal errors (Ctrl+C is normal exit)
+		if err != nil && !isSignalError(err) {
 			return ErrorMsg(err)
 		}
 		return nil

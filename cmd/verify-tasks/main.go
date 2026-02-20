@@ -21,7 +21,7 @@ func main() {
 
 	// 1. Add Task
 	fmt.Println(">> Adding Task: 'Integration Test Task'")
-	performCmd(orchestrator.AddTaskCmd("Integration Test Task"))
+	performCmd(orchestrator.AddTaskCmd("Integration Test Task", ""))
 
 
 

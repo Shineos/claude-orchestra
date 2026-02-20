@@ -14,11 +14,11 @@ AGENT_SCRIPT="$SCRIPT_DIR/agent.sh"
 # --------------------------------------------------------------------------------
 # カラー設定
 # --------------------------------------------------------------------------------
-COLOR_INFO="\033[0;36m"
-COLOR_SUCCESS="\033[0;32m"
-COLOR_WARNING="\033[0;33m"
-COLOR_ERROR="\033[0;31m"
-NC="\033[0m"
+COLOR_INFO=$'\033[0;36m'
+COLOR_SUCCESS=$'\033[0;32m'
+COLOR_WARNING=$'\033[1;33m'
+COLOR_ERROR=$'\033[0;31m'
+NC=$'\033[0m'
 
 check_dependencies() {
     # No longer need jq/ncurses for dashboard itself, but orchestrator might need them.
@@ -35,16 +35,12 @@ check_dependencies() {
 # ダッシュボード表示
 show_dashboard() {
     if [[ -x "$DASHBOARD_BIN" ]]; then
-        # Set up cleanup for child processes
-        trap 'kill $(jobs -p) 2>/dev/null' EXIT INT TERM
-
-        # Run the dashboard and wait for it to complete
+        # ダッシュボードをフォアグラウンドで実行する
+        # NOTE: trap で jobs -p を kill しないこと。
+        #       エージェントは [W] Watch で起動した際に別プロセスグループで動くため、
+        #       ここで kill すると実行中のエージェントも巻き込まれてしまう。
         "$DASHBOARD_BIN"
         local exit_code=$?
-
-        # Clean up any remaining child processes
-        kill $(jobs -p) 2>/dev/null || true
-        wait $(jobs -p) 2>/dev/null || true
 
         return $exit_code
     else

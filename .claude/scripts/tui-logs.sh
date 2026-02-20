@@ -11,15 +11,15 @@
 set -e
 
 # 色設定
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-GRAY='\033[0;37m'
-BOLD='\033[1m'
-NC='\033[0m'
+CYAN=$'\033[0;36m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+RED=$'\033[0;31m'
+BLUE=$'\033[0;34m'
+MAGENTA=$'\033[0;35m'
+GRAY=$'\033[0;37m'
+BOLD=$'\033[1m'
+NC=$'\033[0m'
 
 # このスクリプトの場所
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -415,8 +415,10 @@ draw_header() {
         printf "  ${RED}(エラーのみ)${NC}"
     fi
 
-    printf "                                            ║"
     printf "╚════════════════════════════════════════════════════════════════════╝\n"
+    if [[ -n "$TASK_FILTER_ID" ]]; then
+        printf "${GRAY}💡 AIの思考プロセスを含む詳細ログを表示するには、ダッシュボードで 'v' を押してください${NC}\n"
+    fi
     printf "\n"
 }
 
@@ -464,6 +466,14 @@ main() {
                 fi
                 shift 2
                 ;;
+            --raw-task)
+                # Display raw log file for the task
+                if [[ -n "$2" ]]; then
+                    task_id="$2"
+                    mode="raw"
+                fi
+                shift 2
+                ;;
             -h|--help)
                 show_help
                 exit 0
@@ -496,6 +506,77 @@ main() {
     # Simpler: Export TASK_FILTER_ID variable for the functions to use.
     export TASK_FILTER_ID="$task_id"
 
+    if [[ "$mode" == "raw" ]]; then
+        local raw_file="$LOGS_DIR/task-${task_id}.raw.log"
+        local archive_dir="$LOGS_DIR/archive"
+        local has_content=false
+        local display_file=""
+
+        # まず現在のraw.logをチェック
+        if [[ -s "$raw_file" ]]; then
+            has_content=true
+            display_file="$raw_file"
+        else
+            # raw.logが空の場合、アーカイブされたログを探す
+            if [[ -d "$archive_dir" ]]; then
+                display_file=$(ls -t "$archive_dir"/task-${task_id}_*.raw.log 2>/dev/null | head -1)
+                if [[ -n "$display_file" && -s "$display_file" ]]; then
+                    has_content=true
+                fi
+            fi
+        fi
+
+        if [[ "$has_content" == "true" ]]; then
+            # ログを表示
+            if [[ "$display_file" == "$raw_file" ]]; then
+                printf "${CYAN}詳細タスクログ [#${task_id}]${NC} ${GRAY}(Ctrl+C で終了)${NC}\n"
+            else
+                printf "${CYAN}アーカイブ済みタスクログ [#${task_id}]${NC} ${GRAY}(Ctrl+C で終了)${NC}\n"
+            fi
+            printf "${GRAY}ファイル: ${display_file}${NC}\n"
+            printf "${GRAY}────────────────────────────────────────────────────────────────${NC}\n"
+            tail -f -n +1 "$display_file"
+            printf "\n${GRAY}────────────────────────────────────────────────────────────────${NC}\n"
+        else
+            # raw.logもアーカイブもない場合はオーケストレーターログから該当タスクを表示
+            printf "${YELLOW}詳細実行ログ [#${task_id}]${NC}${GRAY} - raw.logが空のためオーケストレーターログを表示${NC}\n"
+            if [[ -f "$raw_file" ]]; then
+                printf "${GRAY}ファイル: ${raw_file} (空ファイル / 実行中または終了直後)${NC}\n"
+            else
+                printf "${GRAY}ファイル: ${raw_file} (未生成)${NC}\n"
+            fi
+            printf "${GRAY}────────────────────────────────────────────────────────────────${NC}\n"
+            printf "\n"
+
+            # オーケストレーターログから [#task_id] エントリをフィルタして表示
+            local found_any=false
+            for log_file in "$LOGS_DIR"/orchestrator-*.log; do
+                if [[ -f "$log_file" ]]; then
+                    local filtered
+                    filtered=$(grep -F "[#${task_id}]" "$log_file" 2>/dev/null || true)
+                    if [[ -n "$filtered" ]]; then
+                        found_any=true
+                        echo "$filtered" | while IFS= read -r line; do
+                            parse_and_display_log "$line"
+                        done
+                    fi
+                fi
+            done
+
+            if [[ "$found_any" == "false" ]]; then
+                printf "${YELLOW}ログエントリが見つかりませんでした。${NC}\n"
+                printf "  • タスクがまだ実行されていないか、古いログはローテーション済みの可能性があります\n"
+            fi
+
+            printf "\n${GRAY}────────────────────────────────────────────────────────────────${NC}\n"
+            printf "${GRAY}ヒント: タスクの実行が完了すると、詳細な Claude の出力がここに表示されます${NC}\n"
+            printf "\n${GRAY}(Enterキーを押して戻る)${NC}"
+            read -r < /dev/tty
+        fi
+        return
+    fi
+
+ 
     if [[ "$mode" == "follow" ]]; then
         follow_logs "$agent_filter" "$errors_only"
     else
