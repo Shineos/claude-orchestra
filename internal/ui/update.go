@@ -78,6 +78,14 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
         // Global keys (handled regardless of mode, but after input check)
         if msg.Type == tea.KeyEsc {
+            // Handle AddingTask wizard cancellation first
+            if m.InputMode && m.AddingTask {
+                m.AddingTask = false
+                m.AddingStep = 0
+                m.InputMode = false
+                m.Input.Blur()
+                return m, nil
+            }
             if m.InputMode {
                 m.InputMode = false
                 m.Input.Blur()
