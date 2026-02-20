@@ -1,0 +1,27 @@
+{
+  "last_id": 3,
+  "tasks": [
+    {
+      "agent": "planner",
+      "description": "Test Task 1",
+      "id": 1,
+      "started_at": "2026-02-17T03:55:34Z",
+      "status": "in_progress",
+      "updated_at": "2026-02-17T03:55:34Z"
+    },
+    {
+      "agent": "tester",
+      "description": " [Edited]",
+      "id": 2,
+      "status": "pending"
+    },
+    {
+      "agent": "architect",
+      "completed_at": "2026-02-17T03:55:35Z",
+      "description": "Test Task 3",
+      "id": 3,
+      "status": "completed",
+      "updated_at": "2026-02-17T03:55:35Z"
+    }
+  ]
+}

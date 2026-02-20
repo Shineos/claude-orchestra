@@ -15,11 +15,11 @@
 set -e
 
 # 色設定
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
+GREEN=$'\033[0;32m'
+CYAN=$'\033[0;36m'
+YELLOW=$'\033[1;33m'
+RED=$'\033[0;31m'
+NC=$'\033[0m'
 
 # printf を使用した色出力関数（sh/bash互換）
 echo_color() {
@@ -302,6 +302,29 @@ EOF
 
 chmod +x "$CLAUDE_DIR/agent.sh"
 
+# orchestra.sh (簡易版エントリーポイント) 作成
+cat > "$CLAUDE_DIR/orchestra.sh" << 'EOF'
+#!/bin/bash
+# Claude Orchestra 簡易エントリーポイント
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DASHBOARD="$SCRIPT_DIR/scripts/dashboard.sh"
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Claude Orchestra - Management Console"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+if [[ -f "$DASHBOARD" ]]; then
+    bash "$DASHBOARD"
+else
+    echo "エラー: ダッシュボードスクリプトが見つかりません: $DASHBOARD"
+    exit 1
+fi
+EOF
+
+chmod +x "$CLAUDE_DIR/orchestra.sh"
+
 printf "%b" "${GREEN}✓ 起動スクリプトを作成しました${NC}\n"
 echo ""
 
@@ -411,29 +434,23 @@ printf "%b" "${GREEN}  初期化完了！${NC}\n"
 printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 echo ""
 printf "%b" "${CYAN}📁 作成されたファイル:${NC}\n"
-echo "  .claude/"
-echo "    ├── config.json          # プロジェクト設定"
-echo "    ├── tasks.json           # タスク管理データ"
-echo "    ├── agents/              # エージェント設定"
-echo "    │   ├── orchestrator.json"
-echo "    │   ├── frontend.json"
-echo "    │   ├── backend.json"
-echo "    │   ├── tests.json"
-echo "    │   └── docs.json"
-echo "    ├── scripts/             # スクリプトディレクトリ"
-echo "    │   └── orchestrator.sh  # タスク管理スクリプト"
-echo "    └── agent.sh             # エージェント起動スクリプト"
-echo ""
-printf "%b" "${CYAN}🚀 使用方法:${NC}\n"
-echo "  # エージェント起動"
-echo "  ./.claude/agent.sh orchestrator"
-echo "  ./.claude/agent.sh frontend"
-echo ""
-echo "  # タスク管理"
-echo "  ./.claude/scripts/orchestrator.sh status"
-echo "  ./.claude/scripts/orchestrator.sh add \"タスク\" エージェント名"
-echo ""
-printf "%b" "${CYAN}💡 簡易エイリアス（~/.zshrc または ~/.bashrc に追加）:${NC}\n"
-echo "  alias agent=\"./.claude/agent.sh\""
-echo "  alias orch=\"./.claude/scripts/orchestrator.sh\""
+echo "  .claude/
+    ├── orchestra.sh         # 総合管理エントリーポイント
+    ├── agent.sh             # エージェント起動スクリプト
+    ├── config.json          # プロジェクト設定
+    ├── tasks.json           # タスク管理データ
+    ├── agents/              # エージェント設定
+    └── scripts/             # スクリプトディレクトリ
+
+🚀 使用方法:
+  # 管理コンソール（ダッシュボード）を起動
+  bash .claude/orchestra.sh
+
+  # 特定のエージェントを直接起動
+  bash .claude/agent.sh frontend
+
+💡 便利なエイリアス:
+  alias orch="bash ./.claude/orchestra.sh"
+  alias agent="bash ./.claude/agent.sh"
+"
 echo ""

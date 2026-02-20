@@ -62,10 +62,12 @@ mkdir -p "$LOGS_DIR"
 # エージェント名の先頭を大文字にするヘルパー関数
 capitalize_agent() {
     case "$1" in
+        architect) echo "Architect" ;;
         frontend) echo "Frontend" ;;
         backend) echo "Backend" ;;
         tests) echo "Tests" ;;
         docs) echo "Docs" ;;
+        reviewer) echo "Reviewer" ;;
         orchestrator) echo "Orchestrator" ;;
         *) echo "$1" ;;
     esac
@@ -94,8 +96,70 @@ orch_rotate_logs() {
 }
 
 # ==============================================================================
+# ロックファイル機構
+# ==============================================================================
+
+# タスクリーファイル排他制御をロード
+TASK_LOCK_SCRIPT="$SCRIPT_DIR/task-lock.sh"
+if [[ -f "$TASK_LOCK_SCRIPT" ]]; then
+    source "$TASK_LOCK_SCRIPT"
+else
+    # スクリプトがない場合はダミー関数を定義
+    acquire_lock() { return 0; }
+    release_lock() { return 0; }
+    show_lock_status() { echo "ロック機能: 利用不可"; }
+fi
+
+# ==============================================================================
 # 初期化関数
 # ==============================================================================
+
+# Staleタスクのクリーンアップ（放置されたin_progressタスクをpendingに戻す）
+cleanup_stale_tasks() {
+    local stale_threshold_hours="${STALE_THRESHOLD_HOURS:-1}"
+    local stale_threshold_seconds=$((stale_threshold_hours * 3600))
+    local current_time=$(date +%s)
+    local cleaned_count=0
+
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        return 0
+    fi
+
+    # in_progressタスクをチェック
+    local stale_tasks=$(jq -r --argjson current_time "$current_time" --argjson threshold "$stale_threshold_seconds" '
+        .tasks
+        | to_entries
+        | map(select(.value.status == "in_progress" and .value.started_at != null))
+        | map(select(($current_time - (.value.started_at | fromdateiso8601)) > $threshold))
+        | from_entries
+        | keys[]
+    ' "$TASKS_FILE" 2>/dev/null || echo "")
+
+    if [[ -n "$stale_tasks" ]]; then
+        for idx in $stale_tasks; do
+            local task_id=$(jq -r ".tasks[$idx].id" "$TASKS_FILE")
+            orch_log "WARN" "Stale task detected: #$task_id (resetting to pending)"
+            ((cleaned_count++))
+        done
+
+        # 一括でステータスを更新
+        local updated_tasks=$(jq --argjson current_time "$current_time" --argjson threshold "$stale_threshold_seconds" '
+            .tasks |= map(
+                if .status == "in_progress" and .started_at != null and (($current_time - (.started_at | fromdateiso8601)) > $threshold) then
+                    .status = "pending" | .started_at = null | .notes += [{"text": "Auto-recovered from stale state", "timestamp": (now | todateiso8601)}]
+                else
+                    .
+                end
+            )
+        ' "$TASKS_FILE")
+
+        echo "$updated_tasks" > "$TASKS_FILE"
+
+        if [[ $cleaned_count -gt 0 ]]; then
+            orch_log "INFO" "Cleaned up $cleaned_count stale task(s)"
+        fi
+    fi
+}
 
 # 初期化関数
 init_tasks() {
@@ -105,12 +169,52 @@ init_tasks() {
     fi
     # ログローテーション実行
     orch_rotate_logs
+    # Staleタスクのクリーンアップ
+    cleanup_stale_tasks
 }
 
 # タスクID生成
 generate_task_id() {
     local last_id=$(jq -r '.last_id' "$TASKS_FILE")
     echo $((last_id + 1))
+}
+
+# タスクログのアーカイブ
+archive_task_log() {
+    local task_id=$1
+    local raw_log="$LOGS_DIR/task-${task_id}.raw.log"
+    local archive_dir="$LOGS_DIR/archive"
+
+    # アーカイブディレクトリを作成
+    mkdir -p "$archive_dir"
+
+    # raw.logが存在し、内容がある場合はアーカイブ
+    if [[ -s "$raw_log" ]]; then
+        local archive_timestamp=$(date +"%Y%m%d_%H%M%S")
+        local archive_file="$archive_dir/task-${task_id}_${archive_timestamp}.raw.log"
+        mv "$raw_log" "$archive_file"
+        orch_log "INFO" "ログをアーカイブ: $archive_file"
+    fi
+}
+
+# アーカイブされたログの一覧取得
+get_archived_logs() {
+    local task_id=$1
+    local archive_dir="$LOGS_DIR/archive"
+
+    if [[ -d "$archive_dir" ]]; then
+        ls -t "$archive_dir"/task-${task_id}_*.raw.log 2>/dev/null || true
+    fi
+}
+
+# 最新のアーカイブログを取得
+get_latest_archived_log() {
+    local task_id=$1
+    local archive_dir="$LOGS_DIR/archive"
+
+    if [[ -d "$archive_dir" ]]; then
+        ls -t "$archive_dir"/task-${task_id}_*.raw.log 2>/dev/null | head -1 || true
+    fi
 }
 
 # ==============================================================================
@@ -123,6 +227,13 @@ detect_agent() {
     task_desc=$(echo "$task_desc" | tr '[:upper:]' '[:lower:]')
 
     # キーワードパターン定義
+    local architect_keywords=(
+        "api" "仕様" "spec" "契約" "contract" "スキーマ" "schema"
+        "設計" "design" "アーキテクチャ" "architecture"
+        "インターフェース" "interface" "型定義" "type"
+        "openapi" "swagger" "yaml"
+    )
+
     local frontend_keywords=(
         "ui" "画面" "界面" "フロント" "frontend" "コンポーネント" "component"
         "スタイル" "style" "css" "レスポンシブ" "responsive" "アニメーション" "animation"
@@ -133,10 +244,10 @@ detect_agent() {
     )
 
     local backend_keywords=(
-        "api" "サーバー" "server" "バックエンド" "backend" "データベース" "database"
+        "サーバー" "server" "バックエンド" "backend" "データベース" "database"
         "認証" "auth" "ログイン" "login" "サインイン" "signin" "登録" "register"
         "セッション" "session" "トークン" "token" "jwt" "パスワード" "password"
-        "コントローラー" "controller" "モデル" "model" "スキーマ" "schema"
+        "コントローラー" "controller" "モデル" "model"
         "マイグレーション" "migration" "クエリ" "query" "sql" "nosql"
         "エンドポイント" "endpoint" "ルート" "route" "ミドルウェア" "middleware"
         "バリデーション" "validation" "リクエスト" "request" "レスポンス" "response"
@@ -154,6 +265,14 @@ detect_agent() {
         "readme" "api doc" "仕様書" "specification" "コメント" "comment"
         "説明" "explain" "マニュアル" "manual" "ガイド" "guide"
     )
+
+    # Architect チェック（最優先）
+    for keyword in "${architect_keywords[@]}"; do
+        if [[ "$task_desc" == *"$keyword"* ]]; then
+            echo "architect"
+            return 0
+        fi
+    done
 
     # Frontend チェック
     for keyword in "${frontend_keywords[@]}"; do
@@ -203,7 +322,23 @@ decompose_task_ai() {
     orch_log "INFO" "AI分解開始: $task_desc"
 
     # Claudeコマンドが利用可能かチェック
-    if ! command -v claude &> /dev/null; then
+    local claude_cmd="claude"
+    if ! command -v "$claude_cmd" &> /dev/null; then
+        # 標準的なインストール先をチェック
+        local common_paths=(
+            "$HOME/.local/bin/claude"
+            "/usr/local/bin/claude"
+            "/opt/homebrew/bin/claude"
+        )
+        for p in "${common_paths[@]}"; do
+            if [[ -x "$p" ]]; then
+                claude_cmd="$p"
+                break
+            fi
+        done
+    fi
+
+    if ! command -v "$claude_cmd" &> /dev/null; then
         orch_log "WARN" "claude コマンドが見つかりません。Claude Code をインストールしてください"
         return 1
     fi
@@ -226,7 +361,7 @@ decompose_task_ai() {
 
     # Claude CLIを直接呼び出し
     local cli_output
-    cli_output=$(claude -p --system-prompt "$system_prompt" --output-format text "$input_prompt" 2>&1)
+    cli_output=$($claude_cmd -p --system-prompt "$system_prompt" --output-format text "$input_prompt" 2>&1)
     local exit_code=$?
 
     if [[ $exit_code -ne 0 ]]; then
@@ -300,7 +435,7 @@ validate_decomposition() {
     fi
 
     # エージェント名の検証
-    local invalid_agents=$(echo "$json" | jq '[.subtasks[].agent] - ["frontend", "backend", "tests", "docs", "orchestrator"] | unique | length')
+    local invalid_agents=$(echo "$json" | jq '[.subtasks[].agent] - ["architect", "frontend", "backend", "tests", "docs", "reviewer", "orchestrator"] | unique | length')
     if [[ "$invalid_agents" -gt 0 ]]; then
         echo "invalid_agent"
         return 1
@@ -669,6 +804,13 @@ add_task_auto() {
                 # AI失敗 - ルールベースにフォールバック
                 printf "%b" "${YELLOW}AI分解に失敗しました。ルールベースを使用します...${NC}\n"
                 use_rules_fallback=true
+                
+                # すぐに JSON を生成して表示に備える
+                local subtasks=()
+                while IFS= read -r line; do
+                    subtasks+=("$line")
+                done < <(decompose_task_rules "$task_desc")
+                decomposition_json=$(subtasks_array_to_json "${subtasks[@]}")
             fi
         elif [[ "$use_rules_fallback" == "true" ]]; then
             # ルールベース分解
@@ -754,7 +896,9 @@ add_task_auto() {
 
     # 確認された分解からタスクを作成
     local task_ids=()
-    local subtasks=($(echo "$decomposition_json" | jq -c '.subtasks[]'))
+
+    # Use mapfile to safely read JSON objects (avoids word splitting)
+    mapfile -t subtasks < <(echo "$decomposition_json" | jq -c '.subtasks[]')
 
     for subtask_json in "${subtasks[@]}"; do
         local subtask_desc=$(echo "$subtask_json" | jq -r '.description')
@@ -818,8 +962,8 @@ subtasks_array_to_json() {
         local desc="${subtasks[$i]}"
         local agent="${subtasks[$i+1]}"
 
-        # JSONエスケープ
-        desc=$(echo "$desc" | jq -Rs .)
+        # JSONエスケープ (use printf to avoid trailing newline)
+        desc=$(printf "%s" "$desc" | jq -Rs .)
 
         json+="{\"description\":$desc,\"agent\":\"$agent\",\"rationale\":\"ルールベース判定\",\"dependencies\":[]}"
 
@@ -911,7 +1055,8 @@ launch_agents_background() {
     local timeout=""
 
     # タイムアウトが数値のみの場合は、タイムアウトとして扱う
-    if [[ "$last_arg" =~ ^[0-9]+$ ]]; then
+    # ただし、引数が1つの場合はタスクIDとみなす（タイムアウトのみ指定して起動することはないため）
+    if [[ "$last_arg" =~ ^[0-9]+$ ]] && [[ $# -gt 1 ]]; then
         timeout="$last_arg"
         # タイムアウトを除いたタスクIDを取得
         set -- "${@:1:$#-1}"
@@ -1541,43 +1686,84 @@ load_from_json() {
 }
 
 # タスク追加（手動エージェント指定）
+# タスク追加（拡張版：契約・検証ステップ対応）
 add_task() {
     local task_desc="$1"
     local agent="$2"
     local priority="${3:-normal}"
     local dependencies="${4:-[]}"
+    local contract="${5:-null}"
+    local deliverables="${6:-[]}"
+    local verification_steps="${7:-[]}"
+    local definition_of_done="${8:-[]}"
 
     init_tasks
 
     local task_id=$(generate_task_id)
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # 新規タスク作成
-    local new_task=$(cat <<EOF
-{
-  "id": $task_id,
-  "description": "$task_desc",
-  "agent": "$agent",
-  "status": "pending",
-  "priority": "$priority",
-  "dependencies": $dependencies,
-  "created_at": "$timestamp",
-  "updated_at": "$timestamp",
-  "started_at": null,
-  "completed_at": null,
-  "notes": []
-}
-EOF
-)
+    # 新規タスク作成（jqを使用して安全にJSONを構築）
+    local new_task=$(jq -n \
+        --argjson id "$task_id" \
+        --arg desc "$task_desc" \
+        --arg agent "$agent" \
+        --arg priority "$priority" \
+        --argjson deps "$dependencies" \
+        --argjson contract "$contract" \
+        --argjson deliv "$deliverables" \
+        --argjson vsteps "$verification_steps" \
+        --argjson dod "$definition_of_done" \
+        --arg ts "$timestamp" \
+        '{
+          id: $id,
+          description: $desc,
+          agent: $agent,
+          status: "pending",
+          priority: $priority,
+          dependencies: $deps,
+          contract: $contract,
+          deliverables: $deliv,
+          verification_steps: $vsteps,
+          definition_of_done: $dod,
+          created_at: $ts,
+          updated_at: $ts,
+          started_at: null,
+          completed_at: null,
+          notes: [],
+          review_comments: null,
+          rejection_reason: null,
+          related_adr: []
+        }')
 
     # ログ記録
     orch_log "INFO" "タスク追加: [#$task_id] $task_desc (担当: $agent, 優先度: $priority)"
 
-    # タスクを追加
+    # ロックを取得
+    if ! acquire_lock; then
+        printf "%b" "${RED}エラー: タスク追加失敗（ロック取得失敗）${NC}\n"
+        return 1
+    fi
+
+    # タスクを追加（ロック保護）
     jq --argjson new_task "$new_task" \
        --argjson id "$task_id" \
        '.tasks += [$new_task] | .last_id = $id' \
        "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    # 循環依存チェック
+    if ! detect_circular_dependency "$task_id"; then
+        # 循環依存が見つかった場合、タスクを削除
+        jq --argjson id "$task_id" \
+           'del(.tasks[] | select(.id == $id))' \
+           "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+        release_lock
+        printf "%b" "${RED}エラー: 循環依存が検出されたため、タスクを追加できませんでした${NC}\n"
+        return 1
+    fi
+
+    # ロックを解放
+    release_lock
 
     printf "%b" "${GREEN}✓ タスクを追加しました [ID: $task_id]${NC}\n"
     printf "%b" "  ${CYAN}説明:${NC} $task_desc\n"
@@ -1591,18 +1777,65 @@ EOF
         echo ""
         launch_agents_background "$task_id"
     fi
+
+    return 0
 }
 
-# タスク開始
+remove_task_by_id() {
+    local task_id=$1
+
+    # タスク情報を取得 (存在確認)
+    local task=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE")
+    if [[ -z "$task" || "$task" == "null" ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] が見つかりませんでした${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(echo "$task" | jq -r '.description')
+
+    # ロックを取得
+    if ! acquire_lock; then
+        printf "%b" "${RED}エラー: タスク削除失敗（ロック取得失敗）${NC}\n"
+        return 1
+    fi
+
+    # タスクを削除
+    jq --argjson id "$task_id" \
+       'del(.tasks[] | select(.id == $id))' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    release_lock
+
+    printf "%b" "${GREEN}✓ タスクを削除しました [ID: $task_id]${NC}\n"
+    printf "%b" "  ${CYAN}説明:${NC} $task_desc\n"
+}
+
 start_task() {
     local task_id=$1
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # タスク情報をログ
-    local task_desc=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .description' "$TASKS_FILE")
-    local task_agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE")
+    # タスク情報を取得
+    local task=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE")
+    if [[ -z "$task" || "$task" == "null" ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] が見つかりませんでした${NC}\n"
+        return 1
+    fi
+
+    local current_status=$(echo "$task" | jq -r '.status')
+    # pending, stopped, failed のタスクのみ開始可能
+    if [[ "$current_status" != "pending" && "$current_status" != "stopped" && "$current_status" != "failed" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は既に実行中または完了しています (状態: $current_status)${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(echo "$task" | jq -r '.description')
+    local task_agent=$(echo "$task" | jq -r '.agent')
 
     orch_log "INFO" "タスク開始: [#$task_id] $task_desc (担当: $task_agent)"
+
+    # タスク開始時にraw.logをクリア（前回の実行ログを削除）
+    local raw_log_file="$LOGS_DIR/task-${task_id}.raw.log"
+    > "$raw_log_file" 2>/dev/null || true
 
     jq --argjson id "$task_id" \
        --arg timestamp "$timestamp" \
@@ -1614,42 +1847,84 @@ start_task() {
        "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] を開始しました${NC}\n"
+
+    # エージェントが実行中でない場合は起動
+    if [[ -n "$task_agent" && "$task_agent" != "null" && "$task_agent" != "orchestrator" ]]; then
+        local pid_file="$CLAUDE_DIR/pids/${task_agent}.pid"
+        local agent_running=false
+
+        if [[ -f "$pid_file" ]]; then
+            local existing_pid=$(cat "$pid_file" 2>/dev/null)
+            if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+                agent_running=true
+                printf "%b" "${CYAN}エージェント '$task_agent' は既に実行中です (PID: $existing_pid)${NC}\n"
+            fi
+        fi
+
+        if [[ "$agent_running" == "false" ]]; then
+            printf "%b" "${CYAN}エージェント '$task_agent' を起動しています...${NC}\n"
+            local log_file="$LOGS_DIR/agent-$(date +%Y-%m-%d).log"
+            nohup bash "$AGENT_SCRIPT" "$task_agent" watch >> "$log_file" 2>&1 &
+            local agent_pid=$!
+            echo "$agent_pid" > "$pid_file"
+            printf "%b" "${GREEN}✓ エージェント '$task_agent' を起動しました (PID: $agent_pid)${NC}\n"
+        fi
+    fi
 }
 
-# タスク完了
 complete_task() {
     local task_id=$1
     local notes="${2:-}"
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-    # タスク情報をログ
-    local task_desc=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .description' "$TASKS_FILE")
-    local task_agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE")
+    # タスク情報を取得
+    local task=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE")
+    if [[ -z "$task" || "$task" == "null" ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] が見つかりませんでした${NC}\n"
+        return 1
+    fi
+
+    local current_status=$(echo "$task" | jq -r '.status')
+    # Allow both in_progress and pending tasks to be completed
+    if [[ "$current_status" != "in_progress" && "$current_status" != "pending" ]]; then
+        printf "%b" "${YELLOW}タスク [ID: $task_id] は実行中または待機中ではありません (状態: $current_status)${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(echo "$task" | jq -r '.description')
+    local task_agent=$(echo "$task" | jq -r '.agent')
 
     orch_log "INFO" "タスク完了: [#$task_id] $task_desc (担当: $task_agent)"
     [[ -n "$notes" ]] && orch_log "INFO" "  メモ: $notes"
 
+    # 完了したタスクのログをアーカイブ
+    archive_task_log "$task_id"
+
+    # Define update query to handle setting completed status, timestamps, and notes
+    # We also ensure started_at is set if it was null (for pending tasks)
+    local query
     if [[ -n "$notes" ]]; then
-        jq --argjson id "$task_id" \
-           --arg notes "$notes" \
-           --arg timestamp "$timestamp" \
-           '.tasks |= map(if .id == $id then
+        query='.tasks |= map(if .id == $id then
                .status = "completed" |
                .completed_at = $timestamp |
                .updated_at = $timestamp |
+               (.started_at //= $timestamp) |
                .notes += [{"type": "complete", "text": $notes, "timestamp": $timestamp}]
-           else . end)' \
-           "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+           else . end)'
     else
-        jq --argjson id "$task_id" \
-           --arg timestamp "$timestamp" \
-           '.tasks |= map(if .id == $id then
+        query='.tasks |= map(if .id == $id then
                .status = "completed" |
                .completed_at = $timestamp |
-               .updated_at = $timestamp
-           else . end)' \
-           "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+               .updated_at = $timestamp |
+               (.started_at //= $timestamp)
+           else . end)'
     fi
+
+    jq --argjson id "$task_id" \
+       --arg notes "$notes" \
+       --arg timestamp "$timestamp" \
+       "$query" \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
 
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] を完了しました${NC}\n"
 }
@@ -1720,6 +1995,162 @@ reset_task() {
     printf "%b" "${GREEN}✓ タスク [ID: $task_id] をpendingにリセットしました: $task_desc${NC}\n"
 }
 
+# タスクリトライ（失敗したタスクを再実行可能にする）
+retry_task() {
+    local task_id=$1
+    local max_retries="${2:-3}"
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # タスク情報を取得
+    local task_info=$(jq --argjson id "$task_id" '.tasks[] | select(.id == $id)' "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$task_info" ]]; then
+        printf "%b" "${RED}エラー: タスクID $task_id が見つかりません${NC}\n"
+        return 1
+    fi
+
+    local task_desc=$(jq -r '.description' <<< "$task_info")
+    local task_status=$(jq -r '.status' <<< "$task_info")
+    local task_agent=$(jq -r '.agent' <<< "$task_info")
+    local current_retries=$(jq -r '.retries // 0' <<< "$task_info")
+
+    # 失敗またはタイムアウトしたタスクのみリトライ可能
+    if [[ "$task_status" != "failed" ]]; then
+        printf "%b" "${YELLOW}注意: タスク [ID: $task_id] はfailed状態ではありません（現在: $task_status）${NC}\n"
+        printf "%b" "${CYAN}リセットするには: orch reset $task_id${NC}\n"
+        return 1
+    fi
+
+    # 最大リトライ回数チェック
+    if [[ $current_retries -ge $max_retries ]]; then
+        printf "%b" "${RED}エラー: タスク [ID: $task_id] は最大リトライ回数($max_retries)に達しました${NC}\n"
+        printf "%b" "${CYAN}強制的にリトライするには: orch reset $task_id && orch start $task_id${NC}\n"
+        return 1
+    fi
+
+    local new_retries=$((current_retries + 1))
+
+    # ログ記録
+    orch_log "INFO" "タスクリトライ: [#$task_id] $task_desc (試行 $new_retries/$max_retries)"
+
+    # タスクをpendingに戻してリトライ回数をインクリメント
+    jq --argjson id "$task_id" \
+       --argjson retries "$new_retries" \
+       --arg timestamp "$timestamp" \
+       '.tasks |= map(if .id == $id then
+           .status = "pending" |
+           .started_at = null |
+           .completed_at = null |
+           .result = null |
+           .retries = $retries |
+           .updated_at = $timestamp |
+           .notes += [{"type": "retry", "text": "リトライ試行 \($retries)", "timestamp": $timestamp}]
+       else . end)' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    printf "%b" "${GREEN}✓ タスク [ID: $task_id] をリトライ可能にしました (試行 $new_retries/$max_retries)${NC}\n"
+    printf "%b" "${CYAN}  実行するには: orch start $task_id${NC}\n"
+}
+
+# 全失敗タスクを一括リトライ
+retry_all_failed() {
+    local max_retries="${1:-3}"
+    local failed_tasks=$(jq -r '[.tasks[] | select(.status == "failed") | .id] | @sh' "$TASKS_FILE" 2>/dev/null | tr -d "'")
+
+    if [[ -z "$failed_tasks" ]]; then
+        printf "%b" "${YELLOW}失敗したタスクはありません${NC}\n"
+        return 0
+    fi
+
+    printf "%b" "${CYAN}失敗したタスクをリトライ可能にします...${NC}\n"
+    echo ""
+
+    local success_count=0
+    local skip_count=0
+
+    for task_id in $failed_tasks; do
+        if retry_task "$task_id" "$max_retries" 2>/dev/null; then
+            ((success_count++))
+        else
+            ((skip_count++))
+        fi
+    done
+
+    echo ""
+    printf "%b" "${GREEN}✓ $success_count 件のタスクをリトライ可能にしました${NC}\n"
+    if [[ $skip_count -gt 0 ]]; then
+        printf "%b" "${YELLOW}  $skip_count 件は最大リトライ回数に達しました${NC}\n"
+    fi
+}
+
+# 並列エージェント実行
+parallel_agents() {
+    local agents=("$@")
+    local valid_agents=("frontend" "backend" "tests" "docs" "architect" "reviewer")
+    local launched_agents=()
+    local log_dir="$CLAUDE_DIR/logs"
+    mkdir -p "$log_dir"
+
+    if [[ ${#agents[@]} -eq 0 ]]; then
+        printf "%b" "${RED}エラー: エージェントを指定してください${NC}\n"
+        echo "使用方法: $0 parallel <agent1> <agent2> ..."
+        echo ""
+        echo "例:"
+        echo "  $0 parallel frontend backend    # FrontendとBackendを並列実行"
+        echo "  $0 parallel all                  # 全エージェントを並列実行"
+        echo ""
+        echo "利用可能なエージェント: ${valid_agents[*]}"
+        return 1
+    fi
+
+    # "all"が指定された場合は全エージェントを起動
+    if [[ "$1" == "all" ]]; then
+        agents=("${valid_agents[@]}")
+    fi
+
+    # エージェントの検証
+    for agent in "${agents[@]}"; do
+        if [[ ! " ${valid_agents[*]} " =~ " ${agent} " ]]; then
+            printf "%b" "${YELLOW}警告: 不明なエージェント '$agent' をスキップします${NC}\n"
+            continue
+        fi
+        launched_agents+=("$agent")
+    done
+
+    if [[ ${#launched_agents[@]} -eq 0 ]]; then
+        printf "%b" "${RED}エラー: 有効なエージェントが指定されていません${NC}\n"
+        return 1
+    fi
+
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${CYAN}  並列エージェント起動${NC}\n"
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo ""
+
+    # 各エージェントをバックグラウンドで起動
+    for agent in "${launched_agents[@]}"; do
+        local log_file="$log_dir/parallel-${agent}-$(date +%Y%m%d-%H%M%S).log"
+        printf "%b" "${GREEN}🚀 起動中: ${agent}${NC} (ログ: $log_file)\n"
+
+        # バックグラウンドでエージェントを起動
+        nohup bash "$AGENT_SCRIPT" "$agent" watch > "$log_file" 2>&1 &
+        local pid=$!
+
+        # PIDファイルを作成
+        echo "$pid" > "$CLAUDE_DIR/pids/${agent}.pid"
+        echo "{\"started_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\", \"pid\": $pid, \"mode\": \"parallel\"}" > "$CLAUDE_DIR/pids/${agent}.json"
+
+        orch_log "INFO" "並列起動: $agent (PID: $pid)"
+    done
+
+    echo ""
+    printf "%b" "${GREEN}✓ ${#launched_agents[@]} 個のエージェントを並列起動しました${NC}\n"
+    echo ""
+    printf "%b" "${CYAN}ステータス確認: $0 status${NC}\n"
+    printf "%b" "${CYAN}全停止: $0 stop all${NC}\n"
+    printf "%b" "${CYAN}エージェント一覧: $0 agents${NC}\n"
+}
+
 # タスク状況表示
 show_status() {
     init_tasks
@@ -1767,10 +2198,10 @@ show_status() {
     # 優先度順にソートして表示
     jq -r '.tasks | sort_by(.priority) | reverse | .[] |
         "\(.id)\t\(.status)\t\(.priority)\t\(.agent)\t\(.description)"' \
-        "$TASKS_FILE" 2>/dev/null | while IFS=$'\t' read -r id status priority agent desc; do
+        "$TASKS_FILE" 2>/dev/null | while IFS=$'\t' read -r id t_status priority agent desc; do
         local status_icon=""
         local status_color=""
-        case "$status" in
+        case "$t_status" in
             "pending")
                 status_icon="○"
                 status_color="$YELLOW"
@@ -2143,6 +2574,68 @@ execute_all_pending() {
     orch_log "INFO" "すべての保留中タスクの自動実行完了: total=$task_count, success=$success_count, failed=$fail_count"
 }
 
+# ==============================================================================
+# レビュー関連関数
+# ==============================================================================
+
+# レビュー承認
+approve_review() {
+    local task_id="$1"
+    local comments="${2:-}"
+
+    # タスクを完了に移行
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    jq --argjson id "$task_id" \
+       --arg comments "$comments" \
+       --arg timestamp "$timestamp" \
+       '(.tasks[] | select(.id == $id)) |= (.status = "completed" | .completed_at = $timestamp | .review_comments = $comments)' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    orch_log "INFO" "レビュー承認: [#$task_id]"
+    printf "%b" "${GREEN}✓ タスク #$task_id を承認しました${NC}\n"
+}
+
+# レビュー却下
+reject_review() {
+    local task_id="$1"
+    local reason="$2"
+
+    # タスクをrejectedに移行
+    local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    jq --argjson id "$task_id" \
+       --arg reason "$reason" \
+       --arg timestamp "$timestamp" \
+       '(.tasks[] | select(.id == $id)) |= (.status = "rejected" | .rejection_reason = $reason | .updated_at = $timestamp)' \
+       "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+    orch_log "WARN" "レビュー却下: [#$task_id] - $reason"
+    printf "%b" "${YELLOW}⚠ タスク #$task_id を却下しました${NC}\n"
+    printf "%b" "${CYAN}理由: ${NC}$reason\n"
+}
+
+# レビュータスク作成
+create_review_task() {
+    local original_task_id="$1"
+
+    # 元のタスク情報を取得
+    local original_task=$(jq --argjson id "$original_task_id" \
+        '.tasks[] | select(.id == $id)' \
+        "$TASKS_FILE")
+
+    local original_desc=$(echo "$original_task" | jq -r '.description')
+    local original_agent=$(echo "$original_task" | jq -r '.agent')
+
+    # レビュータスクを作成
+    add_task \
+        "レビュー: $original_desc" \
+        "reviewer" \
+        "high" \
+        "[$original_task_id]"
+
+    local review_task_id=$(jq -r '.last_id' "$TASKS_FILE")
+    echo "$review_task_id"
+}
+
 # ヘルプ表示
 show_help() {
     cat << EOF
@@ -2192,6 +2685,18 @@ ${YELLOW}ログ:${NC}
     ${GREEN}log-tail${NC}                    ログをリアルタイム監視
     ${GREEN}logs-errors${NC}                 エラーログのみを一覧表示
 
+${YELLOW}TUI (Terminal UI):${NC}
+    ${GREEN}interactive${NC}                  インタラクティブTUIを起動
+                                       vim風キーバインドでタスク管理
+    ${GREEN}dashboard [--watch|--loop]${NC}  メインダッシュボードを表示
+                                       --watch: 5秒ごと自動更新
+                                       --loop: Enterで更新
+    ${GREEN}board${NC}                       タスクボード（カンバン）を表示（インタラクティブ）
+    ${GREEN}logs-tui [-f] [-n N] [-e]${NC}  TUIライブログビューア
+                                       -f: フォローモード
+                                       -n N: 表示行数指定
+                                       -e: エラーのみ
+
 ${YELLOW}Worktree 操作:${NC}
     ${GREEN}worktree${NC}                    Git Worktree 操作サブコマンド
     ${GREEN}worktree create <agent>${NC}      エージェント用 Worktree 作成
@@ -2203,6 +2708,12 @@ ${YELLOW}Worktree 操作:${NC}
 ${YELLOW}Worktree モード:${NC}
     ${GREEN}USE_WORKTREE=true orch watch <agent>${NC}
                                        Worktree を使用して自動監視
+
+${YELLOW}レビュー:${NC}
+    ${GREEN}review <task_id>${NC}             タスクをレビュー待ちに移行
+    ${GREEN}approve <task_id> [comment]${NC}  レビュー承認（タスク完了）
+    ${GREEN}reject <task_id> <reason>${NC}     レビュー却下
+    ${GREEN}review-create <task_id>${NC}       レビュータスクを作成
 
 ${YELLOW}管理:${NC}
     ${GREEN}reset [--keep-logs]${NC}         オーケストレーターをリセット
@@ -2270,14 +2781,14 @@ worktree_list() {
             fi
 
             # ステータス
-            local status="○"
-            local status_color="$YELLOW"
+            local wt_status="○"
+            local wt_status_color="$YELLOW"
             if [[ -d "$worktree/.git" ]]; then
-                status="✓"
-                status_color="$GREEN"
+                wt_status="✓"
+                wt_status_color="$GREEN"
             fi
 
-            printf "%b" "${status_color}${status}${NC} ${CYAN}${name}${NC} (${MAGENTA}${branch}${NC})\n"
+            printf "%b" "${wt_status_color}${wt_status}${NC} ${CYAN}${name}${NC} (${MAGENTA}${branch}${NC})\n"
         fi
     done
 
@@ -2330,7 +2841,7 @@ worktree_create() {
         printf "%b" "${GREEN}✓ Worktree を作成しました: ${worktree_path}${NC}\n"
         echo ""
         printf "%b" "${CYAN}エージェントを起動するには:${NC}\n"
-        printf "%b" "  ${GREEN}cd ${worktree_path} && ../.claude/agent.sh ${agent}${NC}\n"
+        printf "%b" "  ${GREEN}cd ${worktree_path} && ../../agent.sh ${agent}${NC}\n"
         echo ""
         printf "%b" "${CYAN}または、Worktreeモードで起動:${NC}\n"
         printf "%b" "  ${GREEN}USE_WORKTREE=true orch agent ${agent}${NC}\n"
@@ -2420,16 +2931,224 @@ worktree_launch_agent() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         osascript <<EOF
 tell application "Terminal"
-    do script "cd '$worktree_path' && '../.claude/agent.sh' $agent"
+    do script "cd '$worktree_path' && '../../agent.sh' $agent"
 end tell
 EOF
     else
         printf "%b" "${CYAN}手動で起動:${NC}\n"
-        echo "  cd ${worktree_path} && ../.claude/agent.sh ${agent}"
+        echo "  cd ${worktree_path} && ../../agent.sh ${agent}"
     fi
 }
 
-# ==============================================================================
+# =============================================================================
+# 依存関係可視化
+# =============================================================================
+
+# 依存関係を表示
+show_dependencies() {
+    local task_id="$1"
+
+    if [[ -z "$task_id" ]]; then
+        printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+        echo "使用方法: $0 deps <task_id>"
+        exit 1
+    fi
+
+    # タスクの存在確認
+    local task_exists=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .id' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$task_exists" ]]; then
+        printf "%b" "${RED}エラー: タスク #$task_id が見つかりません${NC}\n"
+        exit 1
+    fi
+
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    printf "%b" "${CYAN}  タスク #$task_id の依存関係${NC}\n"
+    printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+    echo ""
+
+    # タスク情報
+    local task_desc=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .description' \
+        "$TASKS_FILE")
+    local task_status=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .status' \
+        "$TASKS_FILE")
+
+    printf "%b" "${YELLOW}タスク:${NC} #$task_id - $task_desc\n"
+    printf "%b" "${YELLOW}ステータス:${NC} $task_status\n"
+    echo ""
+
+    # 依存先（このタスクが依存しているタスク）
+    printf "%b" "${BLUE}依存先（ブロッカー）:${NC}\n"
+    local dependencies=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.id == $id) | .dependencies[]? // empty' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$dependencies" ]]; then
+        printf "%b" "${GREEN}  なし（タスクを開始できます）${NC}\n"
+    else
+        while IFS= read -r dep_id; do
+            [[ -z "$dep_id" ]] && continue
+            local dep_desc=$(jq -r --argjson id "$dep_id" \
+                '.tasks[] | select(.id == $id) | .description' \
+                "$TASKS_FILE")
+            local dep_status=$(jq -r --argjson id "$dep_id" \
+                '.tasks[] | select(.id == $id) | .status' \
+                "$TASKS_FILE")
+
+            # ステータスに応じて色分け
+            local status_color=""
+            case "$dep_status" in
+                "completed") status_color="$GREEN" ;;
+                "in_progress") status_color="$YELLOW" ;;
+                "pending") status_color="$YELLOW" ;;
+                "review_needed") status_color="$CYAN" ;;
+                "rejected") status_color="$RED" ;;
+                *) status_color="$NC" ;;
+            esac
+
+            printf "  ${CYAN}#$dep_id${NC}: $dep_desc [${status_color}${dep_status}${NC}]"
+        done <<< "$dependencies"
+    fi
+    echo ""
+
+    # 依存元（このタスクを待っているタスク）
+    printf "%b" "${BLUE}依存元（このタスクを待っているタスク）:${NC}\n"
+    local dependents=$(jq -r --argjson id "$task_id" \
+        '.tasks[] | select(.dependencies != null and (.dependencies | contains([$id]))) |
+         "\(.id)\t\(.description)\t\(.status)"' \
+        "$TASKS_FILE" 2>/dev/null)
+
+    if [[ -z "$dependents" ]]; then
+        printf "%b" "${GREEN}  なし${NC}\n"
+    else
+        while IFS=$'\t' read -r dep_id dep_desc dep_status; do
+            [[ -z "$dep_id" ]] && continue
+
+            # ステータスに応じて色分け
+            local status_color=""
+            case "$dep_status" in
+                "completed") status_color="$GREEN" ;;
+                "in_progress") status_color="$YELLOW" ;;
+                "pending") status_color="$YELLOW" ;;
+                "review_needed") status_color="$CYAN" ;;
+                "rejected") status_color="$RED" ;;
+                *) status_color="$NC" ;;
+            esac
+
+            printf "  ${CYAN}#$dep_id${NC}: $dep_desc [${status_color}${dep_status}${NC}]\n"
+        done <<< "$dependents"
+    fi
+    echo ""
+}
+
+# 循環依存検出
+detect_circular_dependency() {
+    local task_id="$1"
+
+    # 再帰的に依存関係をチェック (path is a space-separated string of IDs)
+    check_circular() {
+        local current_id="$1"
+        local path="$2"
+        local depth="${3:-0}"
+
+        # 深さ制限（無限ループ防止）
+        if [[ $depth -gt 50 ]]; then
+            printf "%b" "${RED}エラー: 依存関係が深すぎます（循環の可能性）${NC}\n" >&2
+            return 1
+        fi
+
+        # 循環チェック (current_id がパスに含まれているかを確認)
+        for pid in $path; do
+            if [[ "$pid" == "$current_id" ]]; then
+                printf "%b" "${RED}エラー: 循環依存を検出: #$current_id (パス: $path)${NC}\n" >&2
+                return 1
+            fi
+        done
+
+        # 新しいパス (現在のIDを追加)
+        local new_path="$path $current_id"
+
+        # 依存先を取得
+        local deps=$(jq -r --argjson id "$current_id" \
+            '.tasks[] | select(.id == $id) | .dependencies[]? // empty' \
+            "$TASKS_FILE" 2>/dev/null)
+
+        # 依存先を再帰的にチェック
+        while IFS= read -r dep_id; do
+            [[ -z "$dep_id" ]] && continue
+            if ! check_circular "$dep_id" "$new_path" $((depth + 1)); then
+                return 1
+            fi
+        done <<< "$deps"
+
+        return 0
+    }
+
+    check_circular "$task_id" ""
+}
+
+# =============================================================================
+# Worktreeでのエージェント起動（タスク単位）
+# =============================================================================
+
+# Worktreeでエージェントを起動（タスク単位）
+start_agent_with_worktree() {
+    local agent="$1"
+    local task_id="$2"
+
+    # Worktree名を生成
+    local worktree_name="${agent}-task-${task_id}"
+    local worktree_path="$WORKTREES_DIR/$worktree_name"
+
+    # Worktreeディレクトリ作成
+    mkdir -p "$WORKTREES_DIR"
+
+    # Worktreeが既に存在する場合は確認
+    if [[ -d "$worktree_path" ]]; then
+        printf "%b" "${YELLOW}Worktreeが既に存在します: $worktree_name${NC}\n"
+        printf "%b" "${CYAN}既存のWorktreeを使用します...${NC}\n"
+    else
+        # Git リポジトリチェック
+        if ! git rev-parse --git-dir > /dev/null 2>&1; then
+            printf "%b" "${RED}エラー: Git リポジトリではありません${NC}\n"
+            return 1
+        fi
+
+        # 現在のブランチを取得
+        local current_branch=$(git branch --show-current)
+
+        printf "%b" "${CYAN}Worktreeを作成中: ${MAGENTA}${worktree_name}${NC}\n"
+        printf "%b" "  ベースブランチ: ${MAGENTA}${current_branch}${NC}\n"
+
+        # Worktreeを作成
+        if ! git worktree add "$worktree_path" -b "$worktree_name" "$current_branch"; then
+            printf "%b" "${RED}エラー: Worktreeの作成に失敗しました${NC}\n"
+            return 1
+        fi
+
+        printf "%b" "${GREEN}✓ Worktreeを作成しました: $worktree_path${NC}\n"
+    fi
+
+    echo ""
+    printf "%b" "${CYAN}エージェントをWorktreeで起動: ${MAGENTA}${agent}${NC}\n"
+    printf "%b" "  Worktree: $worktree_path${NC}\n"
+    echo ""
+
+    # Worktree内でエージェントを実行
+    (
+        cd "$worktree_path"
+        # 相対パスでagent.shを呼び出し
+        bash "$CLAUDE_DIR/agent.sh" "$agent"
+    )
+
+    return $?
+}
+
+# =============================================================================
 # 依存関係自動管理機能
 # ==============================================================================
 
@@ -2617,9 +3336,9 @@ EOF
                     # このタスクが完了するまで監視
                     while true; do
                         sleep "$check_interval"
-                        local status=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
-                        if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-                            printf "%b" "${CYAN}タスク [#$task_id] が${status}しました${NC}\n"
+                        local task_stat=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
+                        if [[ "$task_stat" == "completed" || "$task_stat" == "failed" ]]; then
+                            printf "%b" "${CYAN}タスク [#$task_id] が${task_stat}しました${NC}\n"
                             echo ""
                             break
                         fi
@@ -2654,9 +3373,9 @@ EOF
                 # このタスクが完了するまで監視
                 while true; do
                     sleep "$check_interval"
-                    local status=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
-                    if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-                        printf "%b" "${CYAN}タスク [#$task_id] が${status}しました${NC}\n"
+                    local task_stat=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .status' "$TASKS_FILE")
+                    if [[ "$task_stat" == "completed" || "$task_stat" == "failed" ]]; then
+                        printf "%b" "${CYAN}タスク [#$task_id] が${task_stat}しました${NC}\n"
                         echo ""
                         break
                     fi
@@ -2687,6 +3406,24 @@ case "${1:-}" in
     agents)
         show_agents_status
         ;;
+    check-task)
+        # Check if a task exists and return its agent
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            exit 1
+        fi
+
+        task_id="$2"
+        agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE" 2>/dev/null)
+
+        if [[ -n "$agent" && "$agent" != "null" ]]; then
+            echo "OK:$agent"
+            exit 0
+        else
+            printf "%b" "${RED}エラー: タスクID #$task_id が見つからないか、エージェントが割り当てられていません${NC}\n"
+            exit 1
+        fi
+        ;;
     stop)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: エージェント名を指定してください${NC}\n"
@@ -2700,6 +3437,24 @@ case "${1:-}" in
 
         if [[ "$2" == "all" ]]; then
             stop_all_agents
+        elif [[ "$2" =~ ^[0-9]+$ ]]; then
+            # タスクIDが指定された場合、そのタスクのエージェントを特定して停止
+            task_id="$2"
+            agent=$(jq -r --argjson id "$task_id" '.tasks[] | select(.id == $id) | .agent' "$TASKS_FILE")
+            
+            if [[ -n "$agent" && "$agent" != "null" ]]; then
+                stop_agent "$agent"
+                
+                # タスクの状態をstoppedに更新
+                jq --argjson id "$task_id" --arg date "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+                   '(.tasks[] | select(.id == $id)) |= (.status = "stopped" | .updated_at = $date)' \
+                   "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+                
+                printf "%b" "${GREEN}✓ タスク #$task_id (エージェント: $agent) を停止しました${NC}\n"
+            else
+                printf "%b" "${RED}エラー: タスクID #$task_id が見つからないか、エージェントが割り当てられていません${NC}\n"
+                return 1
+            fi
         else
             stop_agent "$2"
         fi
@@ -2744,6 +3499,32 @@ case "${1:-}" in
             reset_orchestrator "$keep_logs"
         fi
         ;;
+    retry)
+        # タスクリトライ
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 retry <task_id|all> [max_retries]"
+            echo ""
+            echo "例:"
+            echo "  $0 retry 5        # タスク#5をリトライ（最大3回）"
+            echo "  $0 retry 5 5      # タスク#5をリトライ（最大5回）"
+            echo "  $0 retry all      # 全失敗タスクをリトライ"
+            exit 1
+        fi
+
+        max_retries="${3:-3}"
+
+        if [[ "$2" == "all" ]]; then
+            retry_all_failed "$max_retries"
+        else
+            retry_task "$2" "$max_retries"
+        fi
+        ;;
+    parallel)
+        # 並列エージェント実行
+        shift  # "parallel"をスキップ
+        parallel_agents "$@"
+        ;;
     remove)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: エージェント名を指定してください${NC}\n"
@@ -2766,12 +3547,21 @@ case "${1:-}" in
             load_from_json
         fi
         ;;
+    remove-task|delete-task)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 remove-task <task_id>"
+            exit 1
+        fi
+        remove_task_by_id "$2"
+        ;;
     add)
         if [[ -z "$2" ]]; then
             printf "%b" "${RED}エラー: タスク説明を指定してください${NC}\n"
             echo "使用方法: $0 add <task> [agent] [priority] [worktree]"
             exit 1
         fi
+
 
         # worktreeオプションをチェック
         _use_worktree="false"
@@ -2968,6 +3758,66 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    deps|dependencies)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 deps <task_id>"
+            exit 1
+        fi
+        show_dependencies "$2"
+        ;;
+    merge|merge-worktree)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: Worktree名またはタスクIDを指定してください${NC}\n"
+            echo "使用方法:"
+            echo "  $0 merge <worktree_name>"
+            echo "  $0 merge <task_id> <agent>"
+            exit 1
+        fi
+
+        # merge-worktree.shスクリプトを実行
+        if [[ -f "$SCRIPT_DIR/merge-worktree.sh" ]]; then
+            bash "$SCRIPT_DIR/merge-worktree.sh" "$2" "$3"
+        else
+            printf "%b" "${RED}エラー: merge-worktree.shが見つかりません${NC}\n"
+            exit 1
+        fi
+        ;;
+    lock-status|lock)
+        show_lock_status
+        ;;
+    review)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 review <task_id>"
+            exit 1
+        fi
+        create_review_task "$2"
+        ;;
+    approve)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 approve <task_id>"
+            exit 1
+        fi
+        approve_review "$2"
+        ;;
+    reject)
+        if [[ -z "$2" || -z "$3" ]]; then
+            printf "%b" "${RED}エラー: タスクIDと却下理由を指定してください${NC}\n"
+            echo "使用方法: $0 reject <task_id> <reason>"
+            exit 1
+        fi
+        reject_review "$2" "$3"
+        ;;
+    review-create)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 review-create <task_id>"
+            exit 1
+        fi
+        create_review_task "$2"
+        ;;
     help|--help|-h)
         show_help
         ;;
@@ -3126,6 +3976,105 @@ case "${1:-}" in
             grep "\[ERROR\]" "$_log_file" | tail -50
         else
             printf "%b" "${YELLOW}ログファイルがありません: $_log_file${NC}\n"
+            exit 1
+        fi
+        ;;
+    review)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 review <task_id>"
+            exit 1
+        fi
+
+        _task_id="$2"
+        jq --argjson id "$_task_id" \
+           '(.tasks[] | select(.id == $id)) |= .status = "review_needed"' \
+           "$TASKS_FILE" > "${TASKS_FILE}.tmp" && mv "${TASKS_FILE}.tmp" "$TASKS_FILE"
+
+        orch_log "INFO" "レビュー待ちに移行: [$_task_id]"
+        printf "%b" "${BLUE}⏳ タスク #$_task_id をレビュー待ちに移行しました${NC}\n"
+        ;;
+    approve)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 approve <task_id> [comment]"
+            exit 1
+        fi
+
+        _task_id="$2"
+        _comment="${3:-}"
+        approve_review "$_task_id" "$_comment"
+        ;;
+    reject)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 reject <task_id> <reason>"
+            exit 1
+        fi
+
+        if [[ -z "$3" ]]; then
+            printf "%b" "${RED}エラー: 却下理由を指定してください${NC}\n"
+            exit 1
+        fi
+
+        _task_id="$2"
+        _reason="$3"
+        reject_review "$_task_id" "$_reason"
+        ;;
+    review-create)
+        if [[ -z "$2" ]]; then
+            printf "%b" "${RED}エラー: タスクIDを指定してください${NC}\n"
+            echo "使用方法: $0 review-create <task_id>"
+            exit 1
+        fi
+
+        _task_id="$2"
+        _review_id=$(create_review_task "$_task_id")
+        printf "%b" "${GREEN}✓ レビュータスクを作成しました: #$_review_id${NC}\n"
+        ;;
+    dashboard)
+        # Dashboard - Go App
+        _bin="$SCRIPT_DIR/../bin/control-center"
+        
+        if [[ ! -x "$_bin" ]]; then
+            printf "%b" "${RED}エラー: control-center バイナリが見つかりません: $_bin${NC}\n"
+            exit 1
+        fi
+
+        # 引数をそのまま渡す (例: --watch)
+        shift # "dashboard" を削除
+        "$_bin" "$@"
+        ;;
+    board|taskboard)
+        # TUI Task Board - インタラクティブTUIと同じ（Kanban）を使用
+        # 旧 tui-taskboard.sh は日本語表示に問題があるため廃止
+        _tui_script="$SCRIPT_DIR/tui-interactive.sh"
+        if [[ -f "$_tui_script" ]]; then
+            bash "$_tui_script" "$@"
+        else
+            printf "%b" "${RED}エラー: tui-interactive.sh が見つかりません。${NC}\n"
+            exit 1
+        fi
+        ;;
+    logs-tui)
+        # TUI Logs - ライブログビューア
+        _tui_script="$SCRIPT_DIR/tui-logs.sh"
+        shift  # Remove 'logs-tui' from arguments
+
+        if [[ ! -f "$_tui_script" ]]; then
+            printf "%b" "${RED}エラー: TUI Logs スクリプトが見つかりません${NC}\n"
+            exit 1
+        fi
+
+        bash "$_tui_script" "$@"
+        ;;
+    interactive|i)
+        # インタラクティブTUIを起動（Kanban）
+        _tui_script="$SCRIPT_DIR/tui-interactive.sh"
+        if [[ -f "$_tui_script" ]]; then
+            bash "$_tui_script" "$@"
+        else
+            printf "%b" "${RED}エラー: tui-interactive.sh が見つかりません。${NC}\n"
             exit 1
         fi
         ;;

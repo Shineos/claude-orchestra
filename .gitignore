@@ -1,4 +1,5 @@
 **/logs/*
+**/*.log
 **/tmp/*
 .tmp/*
 
@@ -10,3 +11,15 @@ tests/*.log
 *.bak
 *.bak2
 *.tmp
+
+# spec
+spec/
+# Claude Orchestra state files
+.claude/pids/
+.claude/tasks/
+.claude/tasks.json
+
+.claude/approvals.json
+
+dist/**/*
+.DS_Store

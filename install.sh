@@ -111,8 +111,8 @@ if [[ -d "$TEMPLATE_DIR/.claude/prompts" ]]; then
 fi
 
 # 4. agent.sh
-if [[ -f "$TEMPLATE_DIR/agent.sh" ]]; then
-    cp "$TEMPLATE_DIR/agent.sh" "$CLAUDE_DIR/"
+if [[ -f "$TEMPLATE_DIR/.claude/agent.sh" ]]; then
+    cp "$TEMPLATE_DIR/.claude/agent.sh" "$CLAUDE_DIR/"
     chmod +x "$CLAUDE_DIR/agent.sh"
     printf "%b" "${GREEN}✓ agent.sh をコピーしました${NC}\n"
 else
@@ -120,15 +120,89 @@ else
     exit 1
 fi
 
-# 5. config.json
+# 5. orchestra.sh (メインエントリーポイント)
+if [[ -f "$TEMPLATE_DIR/.claude/orchestra.sh" ]]; then
+    cp "$TEMPLATE_DIR/.claude/orchestra.sh" "$CLAUDE_DIR/"
+    chmod +x "$CLAUDE_DIR/orchestra.sh"
+    printf "%b" "${GREEN}✓ orchestra.sh をコピーしました${NC}\n"
+fi
+
+# 6. config.json
 if [[ -f "$TEMPLATE_DIR/config.json" ]]; then
     cp "$TEMPLATE_DIR/config.json" "$CLAUDE_DIR/"
     printf "%b" "${GREEN}✓ config.json をコピーしました${NC}\n"
 fi
 
-# 6. tasks.json 初期化
-echo '{"tasks": [], "last_id": 0}' > "$CLAUDE_DIR/tasks.json"
-printf "%b" "${GREEN}✓ tasks.json を初期化しました${NC}\n"
+# 7. tasks.json 初期化
+if [[ ! -f "$CLAUDE_DIR/tasks.json" ]]; then
+    if [[ -f "$TEMPLATE_DIR/.claude/tasks.json.example" ]]; then
+        cp "$TEMPLATE_DIR/.claude/tasks.json.example" "$CLAUDE_DIR/tasks.json"
+        printf "%b" "${GREEN}✓ tasks.json.example から初期化しました${NC}\n"
+    else
+        echo '{"tasks": [], "last_id": 0}' > "$CLAUDE_DIR/tasks.json"
+        printf "%b" "${GREEN}✓ tasks.json を初期化しました${NC}\n"
+    fi
+fi
+
+# 8. approvals.json 初期化
+if [[ ! -f "$CLAUDE_DIR/approvals.json" ]]; then
+    echo '{"approvals": [], "last_id": 0}' > "$CLAUDE_DIR/approvals.json"
+    printf "%b" "${GREEN}✓ approvals.json を初期化しました${NC}\n"
+fi
+
+# 9. control-center バイナリ
+mkdir -p "$CLAUDE_DIR/bin"
+
+# OS/Arch 検出
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+BINARY_NAME=""
+
+case "$OS" in
+    Darwin)
+        if [[ "$ARCH" == "arm64" ]]; then
+            BINARY_NAME="control-center-darwin-arm64"
+        else
+            BINARY_NAME="control-center-darwin-amd64"
+        fi
+        ;;
+    Linux)
+        if [[ "$ARCH" == "x86_64" ]]; then
+            BINARY_NAME="control-center-linux-amd64"
+        else
+            # Fallback or error
+            printf "%b" "${YELLOW}⚠ 未サポートのアーキテクチャ: $OS/$ARCH${NC}\n"
+        fi
+        ;;
+    *)
+        printf "%b" "${YELLOW}⚠ 未サポートのOS: $OS${NC}\n"
+        ;;
+esac
+
+INSTALLED=false
+if [[ -n "$BINARY_NAME" ]]; then
+    # bin/ ディレクトリにあるかチェック（package.sh構成）
+    if [[ -f "$TEMPLATE_DIR/bin/$BINARY_NAME" ]]; then
+        cp "$TEMPLATE_DIR/bin/$BINARY_NAME" "$CLAUDE_DIR/bin/control-center"
+        INSTALLED=true
+    # ルートにあるかチェック（開発環境/旧構成）
+    elif [[ -f "$TEMPLATE_DIR/$BINARY_NAME" ]]; then
+        cp "$TEMPLATE_DIR/$BINARY_NAME" "$CLAUDE_DIR/bin/control-center"
+        INSTALLED=true
+    # control-center そのものがあるかチェック（手動ビルド）
+    elif [[ -f "$TEMPLATE_DIR/control-center" ]]; then
+        cp "$TEMPLATE_DIR/control-center" "$CLAUDE_DIR/bin/"
+        INSTALLED=true
+    fi
+fi
+
+if [[ "$INSTALLED" == "true" ]]; then
+    chmod +x "$CLAUDE_DIR/bin/control-center"
+    printf "%b" "${GREEN}✓ control-center バイナリをインストールしました ($BINARY_NAME)${NC}\n"
+else
+    printf "%b" "${YELLOW}⚠ control-center バイナリが見つかりません (make buildを実行してください)${NC}\n"
+    printf "%b" "${YELLOW}  期待されるバイナリ名: $BINARY_NAME${NC}\n"
+fi
 
 echo ""
 printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
@@ -136,24 +210,27 @@ printf "%b" "${GREEN}  インストール完了！${NC}\n"
 printf "%b" "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
 echo ""
 printf "%b" "${CYAN}📁 ディレクトリ構造:${NC}\n"
-echo "  .claude/"
-echo "    ├── config.json          # プロジェクト設定"
-echo "    ├── tasks.json           # タスク管理データ"
-echo "    ├── agents/              # エージェント設定"
-echo "    │   ├── orchestrator.json"
-echo "    │   ├── frontend.json"
-echo "    │   ├── backend.json"
-echo "    │   ├── tests.json"
-echo "    │   └── docs.json"
-echo "    ├── scripts/             # スクリプトディレクトリ"
-echo "    │   └── orchestrator.sh  # タスク管理スクリプト"
-echo "    └── agent.sh             # エージェント起動スクリプト"
-echo ""
-printf "%b" "${CYAN}🚀 使用方法:${NC}\n"
-echo "  cd $TARGET_PROJECT"
-echo "  # タスク管理"
-echo "  bash .claude/scripts/orchestrator.sh status"
-echo "  bash .claude/scripts/orchestrator.sh add \"タスク名\""
-echo "  # エージェント起動"
-echo "  bash .claude/agent.sh frontend"
+echo "  .claude/
+    ├── orchestra.sh         # 総合管理エントリーポイント（推奨）
+    ├── agent.sh             # エージェント起動スクリプト
+    ├── config.json          # プロジェクト設定
+    ├── tasks.json           # タスク管理データ
+    ├── agents/              # エージェント定義集
+    ├── prompts/             # システムプロンプト集
+    └── scripts/             # ユーティリティスクリプト群
+        └── orchestrator.sh  # タスク管理エンジン
+
+Internal storage:
+    ├── tasks/               # 各タスクの作業ディレクトリ
+    └── logs/                # 実行ログ
+
+🚀 使用方法:
+  cd $TARGET_PROJECT
+
+  # 管理コンソール（ダッシュボード）を起動
+  bash .claude/orchestra.sh
+
+  # 自動実行モードで起動
+  bash .claude/orchestra.sh --auto
+"
 echo ""
